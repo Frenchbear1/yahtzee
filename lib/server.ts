@@ -44,7 +44,7 @@ export async function handleGame(request:Request,db:DB,mode='online'){
    if(latest.id!==s.game_id)fail('This game has been saved to history. Open the current game.',409);
    if(b.revision!==s.revision)fail('This score changed on another screen. Your sheet has been refreshed; try again.',409);
    const scores=JSON.parse(s.scores);let bonus=s.bonus;
-   if(b.action==='score'){if(!validScore(b.category,b.value))fail('Choose a valid score for this category.');if(b.category==='yahtzee'&&b.value!==50&&bonus)fail('Remove your extra Yahtzee bonuses before changing this score.');scores[b.category]=b.value;}
+   if(b.action==='score'){if(!validScore(b.category,b.value))fail('Choose a valid score for this category.');scores[b.category]=b.value;if(b.category==='yahtzee'){if(b.value!==50)bonus=0;else if(b.restoreBonus!==undefined){if(!Number.isInteger(b.restoreBonus)||b.restoreBonus<0||b.restoreBonus>12)fail('That Yahtzee bonus cannot be restored.');bonus=b.restoreBonus;}}}
    else{if(!Number.isInteger(b.bonus)||b.bonus<0||b.bonus>12)fail('Choose between 0 and 12 extra Yahtzees.');if(b.bonus>0&&scores.yahtzee!==50)fail('Score your first Yahtzee as 50 before adding a bonus.');bonus=b.bonus;}
    const complete=totals(scores,bonus).filled===13?Date.now():null;
    const updated=await db.prepare('UPDATE sheets SET scores=?,bonus=?,revision=revision+1,completed_at=? WHERE game_id=? AND player_id=? AND revision=?').bind(JSON.stringify(scores),bonus,complete,s.game_id,me.id,b.revision).run();
