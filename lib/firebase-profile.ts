@@ -2,6 +2,7 @@ type FirebaseUser = {
   uid: string;
   displayName: string | null;
   email: string | null;
+  photoURL: string | null;
 };
 
 type FirebaseCompat = {
@@ -103,6 +104,7 @@ export async function syncGoogleProfile(user: GoogleAccount, currentToken: strin
     playerToken: savedToken,
     displayName: (user.displayName || 'Player').slice(0, 32),
     email: user.email || '',
+    photoURL: user.photoURL || '',
     updatedAt: sdk.firestore.FieldValue.serverTimestamp(),
   }, { merge: true });
 

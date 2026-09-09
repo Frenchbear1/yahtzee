@@ -15,6 +15,13 @@
       "when": 1788967311691,
       "tag": "0001_gorgeous_jubilee",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1788984347829,
+      "tag": "0002_nervous_pretty_boy",
+      "breakpoints": true
     }
   ]
 }
