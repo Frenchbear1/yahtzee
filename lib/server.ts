@@ -118,7 +118,7 @@ export async function handleGame(request: Request, db: DB, mode = 'online') {
     } else if (body.action === 'sync-profile') {
       const photoUrl = cleanPhoto(body.photoUrl);
       const googleName = clean(body.name, 'You');
-      const name = me.name === 'You' ? googleName : me.name;
+      const name = googleName;
       await db.prepare('UPDATE players SET name=?,photo_url=? WHERE id=?').bind(name, photoUrl, me.id).run();
       me.name = name;
       me.photo_url = photoUrl;
@@ -163,6 +163,40 @@ export async function handleGame(request: Request, db: DB, mode = 'online') {
         }
       }
       await db.batch(statements);
+    } else if (body.action === 'delete-room') {
+      const roomId = String(body.roomId || '');
+      const room = await db.prepare('SELECT id,host_id FROM rooms WHERE id=?').bind(roomId).first();
+      if (!room) fail('That table was not found.', 404);
+      if (room.host_id !== me.id) fail('Only the table owner can delete it.', 403);
+      const currentMembers = await db.prepare('SELECT p.id,p.current_room FROM players p JOIN members m ON m.player_id=p.id WHERE m.room_id=?').bind(roomId).all();
+      const statements: any[] = [];
+      let nextRoomForMe = me.current_room;
+      for (const member of currentMembers.results) {
+        if (member.current_room !== roomId) continue;
+        const alternate = await db.prepare('SELECT room_id FROM members WHERE player_id=? AND room_id<>? LIMIT 1').bind(member.id, roomId).first();
+        if (alternate) {
+          statements.push(db.prepare('UPDATE players SET current_room=? WHERE id=?').bind(alternate.room_id, member.id));
+          if (member.id === me.id) nextRoomForMe = alternate.room_id;
+        } else {
+          const fallbackRoom = id(), fallbackGame = id(), now = Date.now();
+          statements.push(
+            db.prepare('INSERT INTO rooms (id,name,code,host_id,created_at) VALUES (?,?,?,?,?)').bind(fallbackRoom, 'My table', code(), member.id, now),
+            db.prepare('INSERT INTO members (room_id,player_id) VALUES (?,?)').bind(fallbackRoom, member.id),
+            db.prepare('INSERT INTO games (id,room_id,started_at) VALUES (?,?,?)').bind(fallbackGame, fallbackRoom, now),
+            db.prepare('INSERT INTO sheets (game_id,player_id) VALUES (?,?)').bind(fallbackGame, member.id),
+            db.prepare('UPDATE players SET current_room=? WHERE id=?').bind(fallbackRoom, member.id),
+          );
+          if (member.id === me.id) nextRoomForMe = fallbackRoom;
+        }
+      }
+      statements.push(
+        db.prepare('DELETE FROM sheets WHERE game_id IN (SELECT id FROM games WHERE room_id=?)').bind(roomId),
+        db.prepare('DELETE FROM games WHERE room_id=?').bind(roomId),
+        db.prepare('DELETE FROM members WHERE room_id=?').bind(roomId),
+        db.prepare('DELETE FROM rooms WHERE id=?').bind(roomId),
+      );
+      await db.batch(statements);
+      me.current_room = nextRoomForMe;
     } else if (body.action === 'join-room' || body.action === 'switch-room') {
       const room = body.action === 'join-room'
         ? await db.prepare('SELECT * FROM rooms WHERE code=?').bind(String(body.code || '').replace(/[^a-z0-9]/gi, '').toUpperCase()).first()
@@ -203,6 +237,24 @@ export async function handleGame(request: Request, db: DB, mode = 'online') {
       const updated = await db.prepare('UPDATE sheets SET scores=?,bonus=?,revision=revision+1,completed_at=? WHERE game_id=? AND player_id=? AND revision=?').bind(JSON.stringify(scores), bonus, complete, sheet.game_id, me.id, body.revision).run();
       if (!updated.meta?.changes) fail('Another screen changed this score. Please try again.', 409);
       await db.prepare('UPDATE games SET ended_at=CASE WHEN NOT EXISTS (SELECT 1 FROM sheets WHERE game_id=? AND completed_at IS NULL) THEN COALESCE(ended_at,?) ELSE NULL END WHERE id=?').bind(sheet.game_id, Date.now(), sheet.game_id).run();
+    } else if (body.action === 'delete-game') {
+      const gameId = String(body.gameId || '');
+      const oldGame = await db.prepare('SELECT g.id,g.room_id,r.host_id FROM games g JOIN rooms r ON r.id=g.room_id WHERE g.id=?').bind(gameId).first();
+      if (!oldGame) fail('That game was not found.', 404);
+      if (oldGame.host_id !== me.id) fail('Only the table owner can delete game history.', 403);
+      const latest = await db.prepare('SELECT id FROM games WHERE room_id=? ORDER BY started_at DESC LIMIT 1').bind(oldGame.room_id).first();
+      const statements = [
+        db.prepare('DELETE FROM sheets WHERE game_id=?').bind(gameId),
+        db.prepare('DELETE FROM games WHERE id=?').bind(gameId),
+      ];
+      if (latest?.id === gameId) {
+        const replacementId = id(), started = Date.now();
+        statements.push(
+          db.prepare('INSERT INTO games (id,room_id,started_at) VALUES (?,?,?)').bind(replacementId, oldGame.room_id, started),
+          db.prepare('INSERT INTO sheets (game_id,player_id) SELECT ?,m.player_id FROM members m JOIN players p ON p.id=m.player_id WHERE m.room_id=? AND (m.player_id=? OR (p.current_room=? AND p.last_seen>=?))').bind(replacementId, oldGame.room_id, me.id, oldGame.room_id, started - 15000),
+        );
+      }
+      await db.batch(statements);
     } else if (body.action === 'new-game') {
       const room = await db.prepare('SELECT * FROM rooms WHERE id=?').bind(me.current_room).first();
       if (room.host_id !== me.id) fail('The table host starts the next game.', 403);

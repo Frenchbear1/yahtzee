@@ -9,7 +9,7 @@ async function call(token,body,status=200){const response=await handleGame(new R
 const a='a'.repeat(64),b='b'.repeat(64),c='c'.repeat(64);
 let alice=await call(a,{action:'bootstrap'}),bob=await call(b,{action:'bootstrap'});
 alice=await call(a,{action:'rename',name:'Alice'});bob=await call(b,{action:'rename',name:'Bob'});
-alice=await call(a,{action:'sync-profile',name:'Alice Example',photoUrl:'https://lh3.googleusercontent.com/a/profile'});assert.equal(alice.me.photo_url,'https://lh3.googleusercontent.com/a/profile');assert.equal(alice.me.name,'Alice');
+alice=await call(a,{action:'sync-profile',name:'Alice Example',photoUrl:'https://lh3.googleusercontent.com/a/profile'});assert.equal(alice.me.photo_url,'https://lh3.googleusercontent.com/a/profile');assert.equal(alice.me.name,'Alice Example');
 bob=await call(b,{action:'join-room',code:alice.room.code});alice=await call(a,{action:'refresh'});
 assert.equal(alice.room.code.length,4);assert.equal(alice.game.id,bob.game.id);assert.equal(alice.game.sheets.length,2);assert.equal(alice.players.filter(p=>p.active).length,2);
 assert.equal(alice.game.sheets.find(s=>s.player_id===alice.me.id).photo_url,'https://lh3.googleusercontent.com/a/profile');assert.equal(alice.managedRooms[0].members.length,2);
@@ -38,8 +38,12 @@ bob=await call(b,{action:'refresh'});assert(mine(bob));alice=await call(a,{actio
 let reloaded=await call(a,{action:'bootstrap'});assert.equal(reloaded.me.id,alice.me.id);assert.equal(reloaded.game.id,alice.game.id);assert.equal(reloaded.history.length,3);
 await call(b,{action:'rename-room',roomId:alice.room.id,name:'Nope'},403);
 reloaded=await call(a,{action:'rename-room',roomId:alice.room.id,name:'Family scores'});assert.equal(reloaded.room.name,'Family scores');
+await call(b,{action:'delete-game',gameId:finishedId},403);
+reloaded=await call(a,{action:'delete-game',gameId:finishedId});assert(!reloaded.history.some(g=>g.id===finishedId));
 await call(b,{action:'remove-member',roomId:alice.room.id,playerId:alice.me.id},403);
 reloaded=await call(a,{action:'remove-member',roomId:alice.room.id,playerId:bob.me.id});assert.equal(reloaded.managedRooms.find(r=>r.id===alice.room.id).members.length,1);
 bob=await call(b,{action:'refresh'});assert.notEqual(bob.room.id,alice.room.id);
-console.log(`PASS: ${checks} API checks: shared rooms, Google photos, room management, remembered players, scoring, history, and access control.`);
+const latestId=reloaded.game.id;reloaded=await call(a,{action:'delete-game',gameId:latestId});assert.notEqual(reloaded.game.id,latestId);assert.deepEqual(mine(reloaded).scores,{});
+const deletedRoomId=reloaded.room.id;await call(b,{action:'delete-room',roomId:deletedRoomId},403);reloaded=await call(a,{action:'delete-room',roomId:deletedRoomId});assert.notEqual(reloaded.room.id,deletedRoomId);assert(!reloaded.rooms.some(r=>r.id===deletedRoomId));
+console.log(`PASS: ${checks} API checks: shared rooms, Google profiles, deletion, remembered players, scoring, history, and access control.`);
 sql.close();

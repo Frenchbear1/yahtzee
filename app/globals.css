@@ -58,3 +58,13 @@
 .score-modal{max-width:440px!important}
 @media(max-width:760px){.compact-head{grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:4px}.compact-head>.btn{font-size:11px;padding:7px 8px}.undo-top{font-size:11px;min-width:58px;padding:8px 4px}.game-label{font-size:11px}.bonus-target{font-size:10px;padding:2px 4px}.bonus-box p{font-size:9px}.keypad-key{min-height:48px}}
 @media(max-width:370px){.compact-head>.btn svg{display:none}.compact-head>.btn{padding:7px 6px}.game-label{font-size:10px}.undo-top{min-width:52px}.bonus-target{font-size:9px}.row-label{gap:2px}}
+.undo-count{display:grid;place-items:center;min-width:17px;height:17px;padding:0 4px;border-radius:100px;background:#e2edb6;color:#31543c;font-size:10px;font-weight:800}
+.history-card{position:relative}
+.history-card summary>.inline{margin-right:30px}
+.history-delete{position:absolute;top:13px;right:13px;width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:#9a554a;z-index:2}
+.history-delete:hover{background:#fff0ec;color:#7f342b}
+.delete-table{width:100%;margin-top:12px;border-color:#e1c3bd;color:#93463b;background:#fffafa}
+.delete-table:hover{background:#fff0ec}
+.delete-dialog{border-radius:18px!important;background:#fff!important;color:#182329}
+.delete-action{background:#9d4437!important;color:#fff!important}
+@media(max-width:760px){.history-delete{top:9px;right:9px}.history-card summary>.inline{margin-right:25px}}
