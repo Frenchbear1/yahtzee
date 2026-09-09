@@ -13,3 +13,17 @@
 @media(max-width:370px){.score-icon{display:none}.nav-tabs{gap:10px!important}.row-label small{font-size:9px}.score-section{padding:0 10px}.brand{font-size:19px}.profile-btn{font-size:12px}.bonus-controls{gap:3px}.yahtzee-bonus{font-size:9px}.header-right{gap:0}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}.confetti{display:none}}
 .listening{display:flex;align-items:center;gap:7px;color:#738178;font-size:13px}.listening>span{width:8px;height:8px;border-radius:50%;background:#5b9b72;box-shadow:0 0 0 4px #e3f0e7}
+
+.score-icon,.score-row.filled .score-icon{border:0;border-radius:0;background:transparent}
+.score-icon svg{width:29px;height:29px}
+.row-label{white-space:nowrap}
+.score-row.filled .score-value{animation:none}
+.yahtzee-score-btn{min-height:50px;margin:10px 0 5px;padding:10px 9px;font-size:14px;gap:7px}
+.yahtzee-button-label{flex:1;text-align:center}
+.yahtzee-score-value{width:29px;height:29px;border-radius:7px;background:#fff9;display:grid;place-items:center;font-size:15px;font-variant-numeric:tabular-nums}
+[data-slot="dialog-content"][data-state="open"],[data-slot="dialog-overlay"][data-state="open"]{animation:quick-fade .1s ease-out both!important}
+[data-slot="dialog-content"][data-state="closed"],[data-slot="dialog-overlay"][data-state="closed"]{animation:none!important}
+@media(max-width:1000px){.score-icon svg{width:26px;height:26px}}
+@media(max-width:760px){.score-columns{grid-template-columns:46% 54%}.score-section{padding:0 10px}.score-section:last-child{padding-left:8px}.score-icon{display:grid;width:24px;height:25px}.score-icon svg{width:24px;height:24px}.yahtzee-score-btn{min-height:45px;margin:7px 0 4px;padding:8px 6px}}
+@media(max-width:370px){.score-columns{grid-template-columns:43% 57%}.score-icon{display:grid;width:20px}.score-icon svg{width:20px;height:20px}.row-label{font-size:12px}.score-section{padding:0 8px}.score-section:last-child{padding-left:6px}.yahtzee-score-btn{font-size:12px}}
+@media(max-width:370px){.nav-tabs{gap:4px!important}.nav-tabs button{font-size:12px;gap:4px}.nav-tabs button svg{width:14px;height:14px}}
