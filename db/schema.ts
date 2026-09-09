@@ -1,0 +1,6 @@
+import { integer, text, sqliteTable, primaryKey, index } from 'drizzle-orm/sqlite-core';
+export const players=sqliteTable('players',{id:text('id').primaryKey(),token:text('token').notNull().unique(),name:text('name').notNull(),currentRoom:text('current_room')});
+export const rooms=sqliteTable('rooms',{id:text('id').primaryKey(),name:text('name').notNull(),code:text('code').notNull().unique(),hostId:text('host_id').notNull(),createdAt:integer('created_at').notNull()});
+export const members=sqliteTable('members',{roomId:text('room_id').notNull(),playerId:text('player_id').notNull()},t=>[primaryKey({columns:[t.roomId,t.playerId]}),index('idx_members_player').on(t.playerId)]);
+export const games=sqliteTable('games',{id:text('id').primaryKey(),roomId:text('room_id').notNull(),startedAt:integer('started_at').notNull(),endedAt:integer('ended_at')},t=>[index('idx_games_room_started').on(t.roomId,t.startedAt)]);
+export const sheets=sqliteTable('sheets',{gameId:text('game_id').notNull(),playerId:text('player_id').notNull(),scores:text('scores').notNull().default('{}'),bonus:integer('bonus').notNull().default(0),revision:integer('revision').notNull().default(0),completedAt:integer('completed_at')},t=>[primaryKey({columns:[t.gameId,t.playerId]})]);
