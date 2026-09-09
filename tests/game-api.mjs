@@ -5,11 +5,15 @@ import {handleGame} from '../.local-build/server-core.mjs';
 const sql=new DatabaseSync(':memory:');for(const name of readdirSync('drizzle').filter(n=>n.endsWith('.sql')).sort())sql.exec(readFileSync(`drizzle/${name}`,'utf8'));
 const db={prepare(q){const s=sql.prepare(q);let args=[];return{bind(...a){args=a;return this},async first(){return s.get(...args)||null},async all(){return{results:s.all(...args)}},async run(){return{meta:{changes:Number(s.run(...args).changes)}}}}},async batch(ss){sql.exec('BEGIN');try{const results=[];for(const s of ss)results.push(await s.run());sql.exec('COMMIT');return results}catch(e){sql.exec('ROLLBACK');throw e}}};
 let checks=0;
-async function call(token,body,status=200){const response=await handleGame(new Request('http://test/api/game',{method:'POST',headers:{'x-player-token':token},body:JSON.stringify(body)}),db,'lan');const result=await response.json();assert.equal(response.status,status,JSON.stringify(result));checks++;return result}
-const a='a'.repeat(64),b='b'.repeat(64),c='c'.repeat(64);
+const identities=new Map([['alice-google',{uid:'google-alice',name:'Alice Example',picture:'https://lh3.googleusercontent.com/a/profile'}]]);
+const verifyGoogle=async token=>{const identity=identities.get(token);if(!identity)throw new Error('invalid');return identity};
+async function call(token,body,status=200,googleToken=''){const response=await handleGame(new Request('http://test/api/game',{method:'POST',headers:{'x-player-token':token,...(googleToken?{authorization:`Bearer ${googleToken}`}:{})},body:JSON.stringify(body)}),db,'lan',verifyGoogle);const result=await response.json();assert.equal(response.status,status,JSON.stringify(result));checks++;return result}
+const a='a'.repeat(64),b='b'.repeat(64),c='c'.repeat(64),d='d'.repeat(64);
 let alice=await call(a,{action:'bootstrap'}),bob=await call(b,{action:'bootstrap'});
 alice=await call(a,{action:'rename',name:'Alice'});bob=await call(b,{action:'rename',name:'Bob'});
-alice=await call(a,{action:'sync-profile',name:'Alice Example',photoUrl:'https://lh3.googleusercontent.com/a/profile'});assert.equal(alice.me.photo_url,'https://lh3.googleusercontent.com/a/profile');assert.equal(alice.me.name,'Alice Example');
+await call(a,{action:'sync-profile',name:'Alice Example',photoUrl:'https://lh3.googleusercontent.com/a/profile'},401);
+alice=await call(a,{action:'sync-profile',name:'Alice Example',photoUrl:'https://lh3.googleusercontent.com/a/profile'},200,'alice-google');assert.equal(alice.me.photo_url,'https://lh3.googleusercontent.com/a/profile');assert.equal(alice.me.name,'Alice Example');
+const aliceOnAnotherDevice=await call(d,{action:'bootstrap'},200,'alice-google');assert.equal(aliceOnAnotherDevice.me.id,alice.me.id);assert.equal((await call(d,{action:'refresh'})).me.id,alice.me.id);
 bob=await call(b,{action:'join-room',code:alice.room.code});alice=await call(a,{action:'refresh'});
 assert.equal(alice.room.code.length,4);assert.equal(alice.game.id,bob.game.id);assert.equal(alice.game.sheets.length,2);assert.equal(alice.players.filter(p=>p.active).length,2);
 assert.equal(alice.game.sheets.find(s=>s.player_id===alice.me.id).photo_url,'https://lh3.googleusercontent.com/a/profile');assert.equal(alice.managedRooms[0].members.length,2);

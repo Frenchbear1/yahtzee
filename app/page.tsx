@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
-  ArrowRight, ArrowUpRight, Check, ChevronDown, Copy, Dice1, Dice2, Dice3, Dice4, Dice5, Dice6,
-  Dices, Download, Flag, History, House, Layers, LoaderCircle, LogIn, LogOut, Monitor, NotebookPen,
-  Plus, RotateCcw, Settings, Sparkles, Star, Trash2, TrendingUp, Trophy, UserMinus, Users,
+  ArrowRight, ArrowUpRight, Check, ChevronDown, Dice1, Dice2, Dice3, Dice4, Dice5, Dice6,
+  Dices, Flag, History, House, Layers, LoaderCircle, LogIn, LogOut, NotebookPen,
+  Plus, RotateCcw, Settings, Share2, Sparkles, Star, Trash2, TrendingUp, Trophy, UserMinus, Users,
 } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
@@ -13,7 +13,7 @@ import { Progress } from '@/components/ui/progress';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Toaster, toast } from 'sonner';
 import { bonusPlans, categories, leaderboard, totals, type Category, type Game, type State } from '@/lib/game';
-import { signInWithGoogle, signOutGoogle, syncGoogleProfile, watchGoogleAccount, type GoogleAccount } from '@/lib/firebase-profile';
+import { getGoogleIdToken, signInWithGoogle, signOutGoogle, watchGoogleAccount, type GoogleAccount } from '@/lib/firebase-profile';
 
 const icons = [Dice1, Dice2, Dice3, Dice4, Dice5, Dice6, Layers, Layers, House, TrendingUp, ArrowUpRight, Star, Dices];
 const yahtzeeCategory = categories.find(category => category.id === 'yahtzee')!;
@@ -21,27 +21,31 @@ const fmtTime = (value: number) => new Date(value).toLocaleTimeString([], { hour
 const fmtDate = (value: number) => new Date(value).toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 const firstName = (name: string) => name.trim().split(/\s+/)[0] || 'You';
 
-function Count({ value, duration = 120 }: { value: number; duration?: number }) {
+function Count({ value, duration = 650, format = value => String(value) }: { value: number; duration?: number; format?: (value: number) => string }) {
   const [display, setDisplay] = useState(value);
-  const previous = useRef(value);
+  const current = useRef(value);
   useEffect(() => {
-    const from = previous.current;
-    previous.current = value;
+    const from = current.current;
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      current.current = value;
       setDisplay(value);
       return;
     }
     let frame = 0;
     const start = performance.now();
+    const adjustedDuration = Math.min(950, Math.max(420, duration + Math.abs(value - from) * 2));
     function tick(time: number) {
-      const progress = Math.min((time - start) / duration, 1);
-      setDisplay(Math.round(from + (value - from) * progress));
+      const progress = Math.min((time - start) / adjustedDuration, 1);
+      const eased = 1 - Math.pow(1 - progress, 5);
+      const next = Math.round(from + (value - from) * eased);
+      current.current = next;
+      setDisplay(next);
       if (progress < 1) frame = requestAnimationFrame(tick);
     }
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
   }, [value, duration]);
-  return <>{display}</>;
+  return <span className="number-ticker">{format(display)}</span>;
 }
 
 function Avatar({ name, photoUrl }: { name: string; photoUrl?: string | null }) {
@@ -64,6 +68,7 @@ export default function Home() {
   const [state, setState] = useState<State | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [accountError, setAccountError] = useState('');
   const [ready, setReady] = useState(false);
   const [tab, setTab] = useState('sheet');
   const [category, setCategory] = useState<Category | null>(null);
@@ -86,6 +91,7 @@ export default function Home() {
   const [googleUser, setGoogleUser] = useState<GoogleAccount | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const token = useRef('');
+  const googleUserRef = useRef<GoogleAccount | null>(null);
   const snapshot = useRef<State | null>(null);
   const busyRef = useRef(false);
   const apiQueue = useRef<Promise<State | null>>(Promise.resolve(null));
@@ -125,10 +131,12 @@ export default function Home() {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
+      let googleToken = '';
+      try { if (googleUserRef.current) googleToken = await getGoogleIdToken(googleUserRef.current); } catch {}
       const response = await fetch('/api/game', {
         signal: controller.signal,
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-player-token': playerToken },
+        headers: { 'Content-Type': 'application/json', 'x-player-token': playerToken, ...(googleToken ? { Authorization: `Bearer ${googleToken}` } : {}) },
         body: JSON.stringify(data),
       });
       const next = await response.json() as State & { error?: string };
@@ -171,7 +179,9 @@ export default function Home() {
       } catch (caught) {
         const failure = caught as Error & { status?: number };
         if (failure.status === 409) setTimeout(() => { void refreshRef.current(); }, 100);
-        setError(failure.name !== 'AbortError' ? failure.message : 'Connection lost. Your input is still here. Please try again.');
+        const message = failure.name !== 'AbortError' ? failure.message : 'Connection lost. Your input is still here. Please try again.';
+        if (message.startsWith('Google sign-in')) setAccountError(message);
+        else setError(message);
         setReady(true);
         return null;
       } finally {
@@ -266,21 +276,21 @@ export default function Home() {
     let unsubscribe: (() => void) | undefined;
     void watchGoogleAccount(async user => {
       if (stopped) return;
+      googleUserRef.current = user;
       setGoogleUser(user);
-      if (!user) return;
+      if (!user) { setAccountError(''); return; }
       try {
         setAuthBusy(true);
-        const accountToken = await syncGoogleProfile(user, token.current);
-        token.current = accountToken;
-        localStorage.setItem('yahtzee-player-key', accountToken);
+        await getGoogleIdToken(user);
         const next = await api({ action: 'bootstrap' });
         if (next) await api({ action: 'sync-profile', name: user.displayName || 'Player', photoUrl: user.photoURL });
+        setAccountError('');
       } catch (caught) {
-        setError(caught instanceof Error ? caught.message : 'Google sign-in could not finish.');
+        setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not finish.');
       } finally {
         setAuthBusy(false);
       }
-    }).then(stop => { unsubscribe = stop; }).catch(caught => setError(caught instanceof Error ? caught.message : 'Google sign-in could not load.'));
+    }).then(stop => { unsubscribe = stop; }).catch(caught => setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not load.'));
     return () => { stopped = true; unsubscribe?.(); };
   }, [api, mode]);
 
@@ -371,11 +381,15 @@ export default function Home() {
     if (game.ended_at) void beginNewGame(); else setModal('new');
   }
 
-  async function copyCode(link = false) {
+  async function shareTable() {
     if (!state) return;
-    const value = link ? `${window.location.origin}/?table=${state.room.code}` : state.room.code;
-    try { await navigator.clipboard.writeText(value); toast.success(link ? 'Table link copied' : 'Table code copied'); }
-    catch { toast('Select and copy your table code below.'); }
+    const url = `${window.location.origin}/?table=${state.room.code}`;
+    try {
+      if (navigator.share) await navigator.share({ title: 'Join my Yahtzee table', text: `Join my Yahtzee table with code ${state.room.code}.`, url });
+      else { await navigator.clipboard.writeText(url); toast.success('Table link copied'); }
+    } catch (caught) {
+      if (!(caught instanceof DOMException) || caught.name !== 'AbortError') toast.error('The table link could not be shared.');
+    }
   }
 
   function openScore(chosen: Category) {
@@ -403,6 +417,22 @@ export default function Home() {
     if (score.upper >= 63) { toast.success('Upper bonus secured'); return; }
     if (bonusNeeded > maxRemainingUpper || !plans.length) { toast('The upper bonus is no longer reachable on this sheet.'); return; }
     setBonusPlanIndex(index => index < 0 ? 0 : index + 1 >= plans.length ? -1 : index + 1);
+  }
+
+  async function retryGoogleSync() {
+    const user = googleUserRef.current;
+    if (!user) return;
+    try {
+      setAuthBusy(true);
+      await getGoogleIdToken(user, true);
+      const next = await api({ action: 'bootstrap' });
+      if (next) await api({ action: 'sync-profile', name: user.displayName || 'Player', photoUrl: user.photoURL });
+      setAccountError('');
+    } catch (caught) {
+      setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not finish.');
+    } finally {
+      setAuthBusy(false);
+    }
   }
 
   function openRoomManagement() {
@@ -449,12 +479,12 @@ export default function Home() {
     const target = !filled && activePlan ? activePlan[chosen.id] : undefined;
     return <button key={chosen.id} className={`score-row ${filled ? 'filled' : ''} ${value === 0 ? 'zero' : ''} ${openOnly && filled ? 'hidden-row' : ''}`} disabled={!sheet} aria-label={`${chosen.name}, ${filled ? `${value} points. Edit score` : target !== undefined ? `bonus plan target ${target} dice. Enter score` : 'not scored. Enter score'}`} onClick={() => openScore(chosen)}>
       <span className="score-icon"><Icon strokeWidth={2} /></span>
-      <span className="row-label"><span>{chosen.name}</span>{target !== undefined && <span className="bonus-target">×{target}</span>}</span>
-      <span className="score-value">{filled ? value : <Plus size={15} strokeWidth={1.4} />}</span>
+      <span className="row-label"><span>{chosen.name}</span>{target !== undefined && <span className="bonus-target">×<Count value={target} /></span>}</span>
+      <span className="score-value">{filled ? <Count value={value} /> : <Plus size={15} strokeWidth={1.4} />}</span>
     </button>;
   }
 
-  const planText = activePlan ? `${bonusNeeded} needed · plan ${bonusPlanIndex + 1}/${plans.length}` : `${score.upper} / 63`;
+  const planText = activePlan ? <><Count value={bonusNeeded} /> needed · plan <Count value={bonusPlanIndex + 1} />/<Count value={plans.length} /></> : <><Count value={score.upper} /> / 63</>;
 
   return <div className="app">
     <Toaster position="top-center" richColors />
@@ -474,14 +504,14 @@ export default function Home() {
 
         <TabsContent value="sheet">
           <div className="compact-head">
-            <span className="game-label">{game ? `Game ${state?.history.length.toString().padStart(2, '0')} · ${fmtTime(game.started_at)}` : 'New game'}</span>
-            <button className="text-btn undo-top" disabled={!undoStack.length} onClick={undo} aria-label={`Undo last score. ${undoStack.length} ${undoStack.length === 1 ? 'change' : 'changes'} available.`}>{savingCount ? <LoaderCircle size={13} className="spinner" /> : <RotateCcw size={13} />}Undo{undoStack.length > 1 && <span className="undo-count">{undoStack.length}</span>}</button>
+            <span className="game-label">{game ? <>Game <Count value={state?.history.length || 0} format={value => value.toString().padStart(2, '0')} /> · {fmtTime(game.started_at)}</> : 'New game'}</span>
+            <button className="text-btn undo-top" disabled={!undoStack.length} onClick={undo} aria-label={`Undo last score. ${undoStack.length} ${undoStack.length === 1 ? 'change' : 'changes'} available.`}>{savingCount ? <LoaderCircle size={13} className="spinner" /> : <RotateCcw size={13} />}Undo{undoStack.length > 1 && <span className="undo-count"><Count value={undoStack.length} /></span>}</button>
             <button className="btn small" disabled={!state || !host || busy || !!savingCount} onClick={requestNewGame}><Plus size={15} />New game</button>
           </div>
           {state && !sheet && <p className="inline-error" style={{ marginBottom: 16 }}>This game is already finished. The host can start a new game to give you a score sheet.</p>}
           <div className="game-grid">
             <section className="sheet">
-              <div className="sheet-head"><h2>{me?.name && me.name !== 'You' ? `${firstName(me.name)}’s` : 'Your'} score sheet</h2><button className={`pill filter ${openOnly ? '' : 'neutral'}`} aria-pressed={openOnly} onClick={() => setOpenOnly(!openOnly)}>{openOnly ? <Check size={12} /> : null}{score.remaining} left {openOnly ? '· show all' : <ChevronDown size={12} />}</button></div>
+              <div className="sheet-head"><h2>{me?.name && me.name !== 'You' ? `${firstName(me.name)}’s` : 'Your'} score sheet</h2><button className={`pill filter ${openOnly ? '' : 'neutral'}`} aria-pressed={openOnly} onClick={() => setOpenOnly(!openOnly)}>{openOnly ? <Check size={12} /> : null}<Count value={score.remaining} /> left {openOnly ? '· show all' : <ChevronDown size={12} />}</button></div>
               <div className="score-columns">
                 <div className="score-section">
                   <div className="section-label">Upper section <span>01—06</span></div>
@@ -496,20 +526,20 @@ export default function Home() {
                 <div className="score-section">
                   <div className="section-label">Lower section <span>07—13</span></div>
                   {categories.slice(6).filter(item => item.id !== 'yahtzee').map(item => row(item, categories.indexOf(item)))}
-                  <button className="celebrate-btn yahtzee-score-btn" disabled={!sheet || sheet.scores.yahtzee === 50 && sheet.bonus >= 12} onClick={pressYahtzee} aria-label={sheet?.scores.yahtzee === 50 ? `Add 100 point Yahtzee bonus. ${(sheet.bonus || 0) * 100} bonus points logged.` : sheet?.scores.yahtzee === 0 ? 'Yahtzee, 0 points. Edit score.' : 'Yahtzee, not scored. Choose 0 or 50.'}><Sparkles size={19} /><span className="yahtzee-button-label">YAHTZEE!</span>{sheet?.scores.yahtzee === null || sheet?.scores.yahtzee === undefined ? <Sparkles size={19} /> : <span className="yahtzee-score-value">{sheet.scores.yahtzee}</span>}</button>
-                  <div className="yahtzee-bonus"><span className="inline" style={{ gap: 4 }}><Sparkles size={13} />Yahtzee bonus</span><strong>{(sheet?.bonus || 0) * 100}</strong></div>
+                  <button className="celebrate-btn yahtzee-score-btn" disabled={!sheet || sheet.scores.yahtzee === 50 && sheet.bonus >= 12} onClick={pressYahtzee} aria-label={sheet?.scores.yahtzee === 50 ? `Add 100 point Yahtzee bonus. ${(sheet.bonus || 0) * 100} bonus points logged.` : sheet?.scores.yahtzee === 0 ? 'Yahtzee, 0 points. Edit score.' : 'Yahtzee, not scored. Choose 0 or 50.'}><Sparkles size={19} /><span className="yahtzee-button-label">YAHTZEE!</span>{sheet?.scores.yahtzee === null || sheet?.scores.yahtzee === undefined ? <Sparkles size={19} /> : <span className="yahtzee-score-value"><Count value={sheet.scores.yahtzee} /></span>}</button>
+                  <div className="yahtzee-bonus"><span className="inline" style={{ gap: 4 }}><Sparkles size={13} />Yahtzee bonus</span><strong><Count value={(sheet?.bonus || 0) * 100} /></strong></div>
                   <div className="subtotal"><span>Lower total</span><strong><Count value={score.lower} /></strong></div>
                 </div>
               </div>
             </section>
 
             <aside className="side">
-              <section className={`total-card ${score.remaining === 0 ? 'complete' : ''}`}><div className="eyebrow">Final score</div><div className="total-number"><Count value={score.total} /><span>pts</span></div><div className="total-breakdown"><div><span>Upper</span><strong><Count value={score.upper} /></strong></div><div><span>Bonus</span><strong>{score.upperBonus ? '+35' : '—'}</strong></div><div><span>Lower</span><strong><Count value={score.lower} /></strong></div></div><Progress className="game-progress" aria-label="Categories completed" value={score.filled / 13 * 100} /></section>
+              <section className={`total-card ${score.remaining === 0 ? 'complete' : ''}`}><div className="eyebrow">Final score</div><div className="total-number"><Count value={score.total} /><span>pts</span></div><div className="total-breakdown"><div><span>Upper</span><strong><Count value={score.upper} /></strong></div><div><span>Bonus</span><strong>{score.upperBonus ? <>+<Count value={35} /></> : '—'}</strong></div><div><span>Lower</span><strong><Count value={score.lower} /></strong></div></div><Progress className="game-progress" aria-label="Categories completed" value={score.filled / 13 * 100} /></section>
               <section className={`table-card ${tableOpen ? 'open' : ''}`}>
-                <button className="card-heading table-toggle" aria-expanded={tableOpen} onClick={() => setTableOpen(!tableOpen)}><h2>{state?.room.name || 'My table'}</h2><span className="pill neutral">{live.length || 1} {live.length === 1 ? 'player' : 'players'} <ChevronDown size={13} /></span></button>
+                <button className="card-heading table-toggle" aria-expanded={tableOpen} onClick={() => setTableOpen(!tableOpen)}><h2>{state?.room.name || 'My table'}</h2><span className="pill neutral"><Count value={live.length || 1} /> {live.length === 1 ? 'player' : 'players'} <ChevronDown size={13} /></span></button>
                 <div className="table-body">
-                  {live.map((playerSheet, index) => <div className="player-row" key={playerSheet.player_id}><span className="player-rank">{index + 1}</span><Avatar name={playerSheet.name} photoUrl={playerSheet.photo_url} /><span className="player-name">{playerSheet.name}{playerSheet.player_id === me?.id && playerSheet.name !== 'You' ? ' (you)' : ''}<small>{playerSheet.completed_at ? 'Finished' : `${totals(playerSheet.scores, playerSheet.bonus).remaining} left`}</small></span><span className="player-score"><Count value={totals(playerSheet.scores, playerSheet.bonus).total} /></span></div>)}
-                  <div className="listening"><span />Listening · {state?.players.filter(player => player.active).length || 1} here</div>
+                  {live.map((playerSheet, index) => <div className="player-row" key={playerSheet.player_id}><span className="player-rank">{index + 1}</span><Avatar name={playerSheet.name} photoUrl={playerSheet.photo_url} /><span className="player-name">{playerSheet.name}{playerSheet.player_id === me?.id && playerSheet.name !== 'You' ? ' (you)' : ''}<small>{playerSheet.completed_at ? 'Finished' : <><Count value={totals(playerSheet.scores, playerSheet.bonus).remaining} /> left</>}</small></span><span className="player-score"><Count value={totals(playerSheet.scores, playerSheet.bonus).total} /></span></div>)}
+                  <div className="listening"><span />Listening · <Count value={state?.players.filter(player => player.active).length || 1} /> here</div>
                   <button className="btn" onClick={() => setModal('family')} disabled={!state}><Plus size={15} />Invite player</button>
                   {score.filled === 13 && <button className="btn primary" onClick={() => setModal('finish')}><Trophy size={15} />Final score</button>}
                 </div>
@@ -520,8 +550,8 @@ export default function Home() {
 
         <TabsContent value="leaderboard">
           <div className="intro"><h1>Leaderboard</h1><button className="btn" onClick={() => setModal('family')} disabled={!state}><Users size={16} />Change table</button></div>
-          <div className="leader-stats"><div className="stat-box"><small>Games</small><strong>{played.length.toString().padStart(2, '0')}</strong></div><div className="stat-box"><small>High score</small><strong>{best || '—'}</strong></div><div className="stat-box"><small>Players</small><strong>{leaders.length || live.length || '—'}</strong></div></div>
-          {leaders.length ? <div className="leader-table"><Table><TableHeader><TableRow><TableHead>#</TableHead><TableHead>Player</TableHead><TableHead>Wins</TableHead><TableHead>Best</TableHead><TableHead>Average</TableHead><TableHead>Games</TableHead></TableRow></TableHeader><TableBody>{leaders.map((player, index) => <TableRow key={player.id}><TableCell>{index === 0 && player.wins ? <Trophy size={18} color="#9a883a" /> : index + 1}</TableCell><TableCell><span className="name-cell"><Avatar name={player.name} photoUrl={player.photo_url} />{player.name}</span></TableCell><TableCell><strong>{player.wins}</strong></TableCell><TableCell>{player.best}</TableCell><TableCell>{Math.round(player.sum / player.games)}</TableCell><TableCell>{player.games}</TableCell></TableRow>)}</TableBody></Table></div> : <Empty kind="trophy" title="No completed games" body="Finish a game to start the leaderboard." action={<button className="btn primary" onClick={() => setTab('sheet')}>Score sheet<ArrowRight size={15} /></button>} />}
+          <div className="leader-stats"><div className="stat-box"><small>Games</small><strong><Count value={played.length} format={value => value.toString().padStart(2, '0')} /></strong></div><div className="stat-box"><small>High score</small><strong>{best ? <Count value={best} /> : '—'}</strong></div><div className="stat-box"><small>Players</small><strong>{leaders.length || live.length ? <Count value={leaders.length || live.length} /> : '—'}</strong></div></div>
+          {leaders.length ? <div className="leader-table"><Table><TableHeader><TableRow><TableHead>#</TableHead><TableHead>Player</TableHead><TableHead>Wins</TableHead><TableHead>Best</TableHead><TableHead>Average</TableHead><TableHead>Games</TableHead></TableRow></TableHeader><TableBody>{leaders.map((player, index) => <TableRow key={player.id}><TableCell>{index === 0 && player.wins ? <Trophy size={18} color="#9a883a" /> : index + 1}</TableCell><TableCell><span className="name-cell"><Avatar name={player.name} photoUrl={player.photo_url} />{player.name}</span></TableCell><TableCell><strong><Count value={player.wins} /></strong></TableCell><TableCell><Count value={player.best} /></TableCell><TableCell><Count value={Math.round(player.sum / player.games)} /></TableCell><TableCell><Count value={player.games} /></TableCell></TableRow>)}</TableBody></Table></div> : <Empty kind="trophy" title="No completed games" body="Finish a game to start the leaderboard." action={<button className="btn primary" onClick={() => setTab('sheet')}>Score sheet<ArrowRight size={15} /></button>} />}
         </TabsContent>
 
         <TabsContent value="history">
@@ -551,7 +581,8 @@ export default function Home() {
       <DialogContent className="modal">
         {modal === 'profile' && <>
           <DialogHeader><DialogTitle>Profile</DialogTitle></DialogHeader>
-          {!mode && <div className="google-auth">{googleUser ? <><div className="google-account"><Avatar name={googleUser.displayName || googleUser.email || 'G'} photoUrl={googleUser.photoURL} /><span><strong>{googleUser.displayName || 'Google account'}</strong><small>{googleUser.email}</small></span></div><button className="btn" disabled={authBusy} onClick={async () => { try { setAuthBusy(true); await signOutGoogle(); setGoogleUser(null); } catch (caught) { setError(caught instanceof Error ? caught.message : 'Could not sign out.'); } finally { setAuthBusy(false); } }}><LogOut size={15} />Sign out</button></> : <button className="btn google-btn" disabled={authBusy} onClick={async () => { try { setAuthBusy(true); await signInWithGoogle(); } catch (caught) { setError(caught instanceof Error ? caught.message : 'Google sign-in was canceled.'); } finally { setAuthBusy(false); } }}><span className="google-g">G</span>{authBusy ? 'Opening Google…' : 'Sign in with Google'}</button>}</div>}
+          {!mode && <div className="google-auth">{googleUser ? <><div className="google-account"><Avatar name={googleUser.displayName || googleUser.email || 'G'} photoUrl={googleUser.photoURL} /><span><strong>{googleUser.displayName || 'Google account'}</strong><small>{googleUser.email}</small></span></div><button className="btn" disabled={authBusy} onClick={async () => { try { setAuthBusy(true); await signOutGoogle(); googleUserRef.current = null; setGoogleUser(null); setAccountError(''); } catch (caught) { setAccountError(caught instanceof Error ? caught.message : 'Could not sign out.'); } finally { setAuthBusy(false); } }}><LogOut size={15} />Sign out</button></> : <button className="btn google-btn" disabled={authBusy} onClick={async () => { try { setAuthBusy(true); await signInWithGoogle(); } catch (caught) { setAccountError(caught instanceof Error ? caught.message : 'Google sign-in was canceled.'); } finally { setAuthBusy(false); } }}><span className="google-g">G</span>{authBusy ? 'Opening Google…' : 'Sign in with Google'}</button>}</div>}
+          {accountError && <div role="alert" className="inline-error account-error">{accountError} {googleUser && <button className="text-btn" disabled={authBusy} onClick={() => void retryGoogleSync()}>Try again</button>}</div>}
           <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'rename', name: profileName }); if (next) setModal(null); }}><label className="field-label" htmlFor="player-name">Player name</label><input id="player-name" className="field" autoFocus maxLength={32} placeholder="David" value={profileName} onChange={event => setProfileName(event.target.value)} required /><button className="btn primary" style={{ width: '100%', marginTop: 15 }} disabled={busy || !profileName.trim()}>Save<Check size={16} /></button></form>
           {!!state?.managedRooms.length && <button className="btn manage-button" onClick={openRoomManagement}><Settings size={16} />Manage tables</button>}
         </>}
@@ -569,18 +600,17 @@ export default function Home() {
         </>}
 
         {modal === 'family' && <>
-          <DialogHeader><DialogTitle>Your family table</DialogTitle><DialogDescription>{mode ? 'Everyone opens the address shown on the host computer, then joins with this code.' : 'Share your table link and code. Everyone scores on their own phone.'}</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>Your family table</DialogTitle><DialogDescription>{mode ? 'Everyone opens the address shown on the host computer, then joins with this code.' : 'Share the table. The code will already be filled in when the link opens.'}</DialogDescription></DialogHeader>
           {me?.name === 'You' && <button className="btn" onClick={() => { setProfileName(''); setModal('profile'); }}>First, add your name<ArrowRight size={15} /></button>}
-          {state && <><div className="room-code">{state.room.code}</div><div className="actions"><button className="btn" onClick={() => void copyCode()}><Copy size={15} />Copy code</button><button className="btn primary" onClick={() => void copyCode(true)}><Copy size={15} />Copy table link</button></div></>}
+          {state && <><div className="room-code">{state.room.code}</div>{!mode && <button className="btn primary share-table" onClick={() => void shareTable()}><Share2 size={16} />Share table</button>}</>}
           <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'join-room', code: joinCode }); if (next) { setModal(null); setJoinCode(''); setTab('sheet'); toast.success('You’re at the table.'); } }}><label className="field-label" htmlFor="join-code">Table code</label><div className="inline"><input id="join-code" className="field" placeholder="ABCD" autoCapitalize="characters" autoCorrect="off" maxLength={8} value={joinCode} onChange={event => setJoinCode(event.target.value.toUpperCase())} /><button className="btn primary" disabled={busy || ![4, 8].includes(joinCode.replace(/[^a-z0-9]/gi, '').length)}>Join<ArrowRight size={14} /></button></div></form>
           {error && <div role="alert" className="inline-error">{error}</div>}
           <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'create-room', name: tableName }); if (next) { toast.success('Your new table is ready. Share the code above.'); setTab('sheet'); } }}><label className="field-label" htmlFor="table-name">Start a separate table</label><div className="inline"><input className="field" id="table-name" value={tableName} onChange={event => setTableName(event.target.value)} maxLength={32} required /><button className="btn" disabled={busy || !tableName.trim()}>Create</button></div></form>
           {state && state.rooms.length > 1 && <div className="room-list section-divider"><h3 className="field-label">Your tables</h3>{state.rooms.map(room => <button key={room.id} className="btn" disabled={busy || room.id === state.room.id} onClick={async () => { if (await api({ action: 'switch-room', roomId: room.id })) { setModal(null); setTab('sheet'); } }}>{room.name}{room.id === state.room.id ? <Check size={14} /> : <ArrowRight size={14} />}</button>)}</div>}
-          <div className="section-divider"><h3 className="modal-subheading inline"><Monitor size={16} />{mode ? 'Playing on Wi-Fi only' : 'Want Wi-Fi-only play?'}</h3><p className="install-note" style={{ marginTop: 8 }}>{mode ? 'Keep the host computer awake. Scores and game history are saved in its local database.' : 'The online version needs internet and Site access for each player. For private, internet-free play, run the local edition on one computer and connect everyone to the same Wi-Fi.'}</p>{!mode && <a className="btn" style={{ marginTop: 12, width: '100%' }} href="/yahtzee-local.zip" download><Download size={15} />Download the local edition</a>}</div>
         </>}
 
         {modal === 'new' && <><DialogHeader><DialogTitle>Start a new game?</DialogTitle><DialogDescription>This game isn’t finished. Starting over will save it as unfinished.</DialogDescription></DialogHeader><div className="actions"><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy || !host} onClick={() => void beginNewGame()}>Start new game<ArrowRight size={15} /></button></div>{error && <p className="inline-error">{error}</p>}</>}
-        {modal === 'finish' && <><DialogHeader><DialogTitle>Final score</DialogTitle><DialogDescription>{me?.name === 'You' ? 'Your' : `${firstName(me?.name || 'Your')}’s`} final score · {game ? fmtDate(game.started_at) : ''}</DialogDescription></DialogHeader><div><div className="finish-line"><span>Upper section</span><strong><Count value={score.upper} /></strong></div>{phase >= 1 && <div className="finish-line"><span>Upper bonus</span><strong>{score.upperBonus ? '+35' : '0'}</strong></div>}{phase >= 2 && <div className="finish-line"><span>Lower section {sheet?.bonus ? '(includes Yahtzee bonus)' : ''}</span><strong><Count value={score.lower} /></strong></div>}</div><div className="finish-score"><p>GRAND TOTAL</p><strong><Count value={phase >= 3 ? score.total : 0} duration={700} /></strong></div><p className="install-note">{game?.ended_at ? 'Saved with everyone’s scores in game history.' : 'Your score is saved. The table result will be final when everyone finishes.'}</p><div className="actions"><button className="btn" onClick={() => { setModal(null); setTab('history'); }}>Game history</button>{host ? <button className="btn primary" onClick={requestNewGame}>Play again<ArrowRight size={15} /></button> : <button className="btn primary" onClick={() => setModal(null)}>Back to the table</button>}</div></>}
+        {modal === 'finish' && <><DialogHeader><DialogTitle>Final score</DialogTitle><DialogDescription>{me?.name === 'You' ? 'Your' : `${firstName(me?.name || 'Your')}’s`} final score · {game ? fmtDate(game.started_at) : ''}</DialogDescription></DialogHeader><div><div className="finish-line"><span>Upper section</span><strong><Count value={score.upper} /></strong></div>{phase >= 1 && <div className="finish-line"><span>Upper bonus</span><strong>{score.upperBonus ? <>+<Count value={35} /></> : <Count value={0} />}</strong></div>}{phase >= 2 && <div className="finish-line"><span>Lower section {sheet?.bonus ? '(includes Yahtzee bonus)' : ''}</span><strong><Count value={score.lower} /></strong></div>}</div><div className="finish-score"><p>GRAND TOTAL</p><strong><Count value={phase >= 3 ? score.total : 0} duration={700} /></strong></div><p className="install-note">{game?.ended_at ? 'Saved with everyone’s scores in game history.' : 'Your score is saved. The table result will be final when everyone finishes.'}</p><div className="actions"><button className="btn" onClick={() => { setModal(null); setTab('history'); }}>Game history</button>{host ? <button className="btn primary" onClick={requestNewGame}>Play again<ArrowRight size={15} /></button> : <button className="btn primary" onClick={() => setModal(null)}>Back to the table</button>}</div></>}
       </DialogContent>
     </Dialog>
 

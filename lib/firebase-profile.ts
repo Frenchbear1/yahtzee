@@ -3,6 +3,7 @@ type FirebaseUser = {
   displayName: string | null;
   email: string | null;
   photoURL: string | null;
+  getIdToken: (forceRefresh?: boolean) => Promise<string>;
 };
 
 type FirebaseCompat = {
@@ -13,14 +14,6 @@ type FirebaseCompat = {
     signInWithPopup: (provider: unknown) => Promise<{ user: FirebaseUser }>;
     signOut: () => Promise<void>;
   }) & { GoogleAuthProvider: new () => unknown };
-  firestore: (() => {
-    collection: (name: string) => {
-      doc: (id: string) => {
-        get: () => Promise<{ exists: boolean; data: () => Record<string, unknown> }>;
-        set: (data: Record<string, unknown>, options?: { merge: boolean }) => Promise<void>;
-      };
-    };
-  }) & { FieldValue: { serverTimestamp: () => unknown } };
 };
 
 declare global {
@@ -66,7 +59,6 @@ async function firebase() {
     loading = (async () => {
       await loadScript(`https://www.gstatic.com/firebasejs/${sdkVersion}/firebase-app-compat.js`);
       await loadScript(`https://www.gstatic.com/firebasejs/${sdkVersion}/firebase-auth-compat.js`);
-      await loadScript(`https://www.gstatic.com/firebasejs/${sdkVersion}/firebase-firestore-compat.js`);
       if (!window.firebase) throw new Error('Google sign-in could not start.');
       if (!window.firebase.apps.length) window.firebase.initializeApp(firebaseConfig);
       return window.firebase;
@@ -91,22 +83,6 @@ export async function signOutGoogle() {
   await sdk.auth().signOut();
 }
 
-export async function syncGoogleProfile(user: GoogleAccount, currentToken: string) {
-  const sdk = await firebase();
-  const ref = sdk.firestore().collection('users').doc(user.uid);
-  const snapshot = await ref.get();
-  const existing = snapshot.exists ? snapshot.data() : {};
-  const savedToken = typeof existing.playerToken === 'string' && /^[a-f0-9]{64}$/.test(existing.playerToken)
-    ? existing.playerToken
-    : currentToken;
-
-  await ref.set({
-    playerToken: savedToken,
-    displayName: (user.displayName || 'Player').slice(0, 32),
-    email: user.email || '',
-    photoURL: user.photoURL || '',
-    updatedAt: sdk.firestore.FieldValue.serverTimestamp(),
-  }, { merge: true });
-
-  return savedToken;
+export async function getGoogleIdToken(user: GoogleAccount, forceRefresh = false) {
+  return user.getIdToken(forceRefresh);
 }

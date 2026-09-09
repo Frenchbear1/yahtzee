@@ -29,6 +29,7 @@
 @media(max-width:370px){.nav-tabs{gap:4px!important}.nav-tabs button{font-size:12px;gap:4px}.nav-tabs button svg{width:14px;height:14px}}
 
 .avatar{position:relative;overflow:hidden}
+.number-ticker{display:inline-block;font-variant-numeric:tabular-nums;white-space:nowrap}
 .avatar>span{position:relative;z-index:0}
 .avatar img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1}
 .compact-head{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center}
@@ -59,6 +60,8 @@
 @media(max-width:760px){.compact-head{grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:4px}.compact-head>.btn{font-size:11px;padding:7px 8px}.undo-top{font-size:11px;min-width:58px;padding:8px 4px}.game-label{font-size:11px}.bonus-target{font-size:10px;padding:2px 4px}.bonus-box p{font-size:9px}.keypad-key{min-height:48px}}
 @media(max-width:370px){.compact-head>.btn svg{display:none}.compact-head>.btn{padding:7px 6px}.game-label{font-size:10px}.undo-top{min-width:52px}.bonus-target{font-size:9px}.row-label{gap:2px}}
 .undo-count{display:grid;place-items:center;min-width:17px;height:17px;padding:0 4px;border-radius:100px;background:#e2edb6;color:#31543c;font-size:10px;font-weight:800}
+.account-error{margin-top:12px}
+.share-table{width:100%;margin-top:12px}
 .history-card{position:relative}
 .history-card summary>.inline{margin-right:30px}
 .history-delete{position:absolute;top:13px;right:13px;width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:#9a554a;z-index:2}

@@ -1,6 +1,47 @@
 import { totals, validScore } from './game';
 
 type DB = { prepare: (query: string) => any; batch: (statements: any[]) => Promise<any[]> };
+type GoogleIdentity = { uid: string; name?: string; picture?: string };
+type GoogleVerifier = (token: string) => Promise<GoogleIdentity>;
+type FirebaseJwk = JsonWebKey & { kid?: string };
+
+const firebaseProjectId = 'yahtzee-78e13';
+const firebaseIssuer = `https://securetoken.google.com/${firebaseProjectId}`;
+const firebaseJwksUrl = 'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com';
+let firebaseKeys: { expiresAt: number; keys: FirebaseJwk[] } | null = null;
+
+const decodePart = (value: string) => {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
+  return Uint8Array.from(atob(normalized), character => character.charCodeAt(0));
+};
+
+const decodeJson = (value: string) => JSON.parse(new TextDecoder().decode(decodePart(value)));
+
+async function getFirebaseKeys() {
+  if (firebaseKeys && firebaseKeys.expiresAt > Date.now()) return firebaseKeys.keys;
+  const response = await fetch(firebaseJwksUrl);
+  if (!response.ok) throw new Error('Google keys unavailable.');
+  const body = await response.json() as { keys?: FirebaseJwk[] };
+  if (!Array.isArray(body.keys)) throw new Error('Google keys unavailable.');
+  const maxAge = Number(response.headers.get('cache-control')?.match(/max-age=(\d+)/)?.[1] || 3600);
+  firebaseKeys = { keys: body.keys, expiresAt: Date.now() + Math.max(60, maxAge - 60) * 1000 };
+  return body.keys;
+}
+
+export async function verifyFirebaseToken(token: string): Promise<GoogleIdentity> {
+  const parts = token.split('.');
+  if (parts.length !== 3) throw new Error('Invalid Google token.');
+  const header = decodeJson(parts[0]) as { alg?: string; kid?: string };
+  const payload = decodeJson(parts[1]) as { aud?: string; iss?: string; sub?: string; exp?: number; iat?: number; auth_time?: number; name?: string; picture?: string };
+  if (header.alg !== 'RS256' || !header.kid) throw new Error('Invalid Google token.');
+  const jwk = (await getFirebaseKeys()).find(key => key.kid === header.kid);
+  if (!jwk) { firebaseKeys = null; throw new Error('Google signing key unavailable.'); }
+  const key = await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+  const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, decodePart(parts[2]), new TextEncoder().encode(`${parts[0]}.${parts[1]}`));
+  const now = Math.floor(Date.now() / 1000);
+  if (!valid || payload.aud !== firebaseProjectId || payload.iss !== firebaseIssuer || typeof payload.sub !== 'string' || !payload.sub || payload.sub.length > 128 || typeof payload.exp !== 'number' || payload.exp <= now || typeof payload.iat !== 'number' || payload.iat > now + 300 || typeof payload.auth_time !== 'number' || payload.auth_time > now + 300) throw new Error('Invalid Google token.');
+  return { uid: payload.sub, name: typeof payload.name === 'string' ? payload.name : undefined, picture: typeof payload.picture === 'string' ? payload.picture : undefined };
+}
 
 class APIError extends Error {
   constructor(message: string, public status = 400) {
@@ -35,7 +76,7 @@ async function shortenCode(db: DB, room: any) {
   }
 }
 
-export async function handleGame(request: Request, db: DB, mode = 'online') {
+export async function handleGame(request: Request, db: DB, mode = 'online', verifyGoogle: GoogleVerifier = verifyFirebaseToken) {
   const json = (data: any, status = 200) => Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } });
   try {
     const token = request.headers.get('x-player-token') || '';
@@ -48,19 +89,40 @@ export async function handleGame(request: Request, db: DB, mode = 'online') {
 
     const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))), byte => byte.toString(16).padStart(2, '0')).join('');
     const seenAt = Date.now();
-    let me = await db.prepare('SELECT id,name,photo_url,current_room FROM players WHERE token=?').bind(hash).first();
+    let me = await db.prepare('SELECT id,name,photo_url,current_room,google_uid FROM players WHERE token=? OR id=(SELECT player_id FROM player_tokens WHERE token=?) LIMIT 1').bind(hash, hash).first();
+    let google: GoogleIdentity | null = null;
+    const authorization = request.headers.get('authorization') || '';
+    if (authorization.startsWith('Bearer ')) {
+      const identity = await verifyGoogle(authorization.slice(7)).catch(() => fail('Google sign-in needs to reconnect. Open Profile and sign in again.', 401));
+      google = identity;
+      const linked = await db.prepare('SELECT id,name,photo_url,current_room,google_uid FROM players WHERE google_uid=?').bind(identity.uid).first();
+      if (linked) {
+        me = linked;
+        await db.prepare('INSERT INTO player_tokens (token,player_id) VALUES (?,?) ON CONFLICT(token) DO UPDATE SET player_id=excluded.player_id').bind(hash, me.id).run();
+      } else if (me && (!me.google_uid || me.google_uid === identity.uid)) {
+        await db.prepare('UPDATE players SET google_uid=? WHERE id=?').bind(identity.uid, me.id).run();
+        await db.prepare('INSERT INTO player_tokens (token,player_id) VALUES (?,?) ON CONFLICT(token) DO UPDATE SET player_id=excluded.player_id').bind(hash, me.id).run();
+        me.google_uid = identity.uid;
+      } else if (me?.google_uid !== identity.uid) {
+        me = null;
+      }
+    }
 
     if (!me) {
       if (body.action !== 'bootstrap') fail('Reconnect your player profile.', 401);
       const playerId = id(), roomId = id(), gameId = id(), now = Date.now();
-      await db.batch([
-        db.prepare('INSERT INTO players (id,token,name,photo_url,current_room,last_seen) VALUES (?,?,?,?,?,?)').bind(playerId, hash, 'You', null, roomId, now),
+      const googleName = clean(google?.name, 'You'), googlePhoto = cleanPhoto(google?.picture);
+      const accountHash = google ? Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`google:${google.uid}`))), byte => byte.toString(16).padStart(2, '0')).join('') : hash;
+      const statements = [
+        db.prepare('INSERT INTO players (id,token,google_uid,name,photo_url,current_room,last_seen) VALUES (?,?,?,?,?,?,?)').bind(playerId, accountHash, google?.uid || null, googleName, googlePhoto, roomId, now),
         db.prepare('INSERT INTO rooms (id,name,code,host_id,created_at) VALUES (?,?,?,?,?)').bind(roomId, 'My table', code(), playerId, now),
         db.prepare('INSERT INTO members (room_id,player_id) VALUES (?,?)').bind(roomId, playerId),
         db.prepare('INSERT INTO games (id,room_id,started_at) VALUES (?,?,?)').bind(gameId, roomId, now),
         db.prepare('INSERT INTO sheets (game_id,player_id) VALUES (?,?)').bind(gameId, playerId),
-      ]);
-      me = { id: playerId, name: 'You', photo_url: null, current_room: roomId };
+      ];
+      if (google) statements.push(db.prepare('INSERT INTO player_tokens (token,player_id) VALUES (?,?) ON CONFLICT(token) DO UPDATE SET player_id=excluded.player_id').bind(hash, playerId));
+      await db.batch(statements);
+      me = { id: playerId, name: googleName, photo_url: googlePhoto, current_room: roomId, google_uid: google?.uid || null };
     }
 
     await db.prepare('UPDATE players SET last_seen=? WHERE id=?').bind(seenAt, me.id).run();
@@ -116,9 +178,11 @@ export async function handleGame(request: Request, db: DB, mode = 'online') {
       await db.prepare('UPDATE players SET name=? WHERE id=?').bind(name, me.id).run();
       me.name = name;
     } else if (body.action === 'sync-profile') {
+      if (!google) fail('Sign in with Google before syncing your profile.', 401);
+      const identity = google as GoogleIdentity;
+      if (me.google_uid !== identity.uid) fail('Sign in with Google before syncing your profile.', 401);
       const photoUrl = cleanPhoto(body.photoUrl);
-      const googleName = clean(body.name, 'You');
-      const name = googleName;
+      const name = clean(body.name || identity.name, 'You');
       await db.prepare('UPDATE players SET name=?,photo_url=? WHERE id=?').bind(name, photoUrl, me.id).run();
       me.name = name;
       me.photo_url = photoUrl;

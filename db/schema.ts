@@ -1,5 +1,6 @@
 import { integer, text, sqliteTable, primaryKey, index } from 'drizzle-orm/sqlite-core';
-export const players=sqliteTable('players',{id:text('id').primaryKey(),token:text('token').notNull().unique(),name:text('name').notNull(),photoUrl:text('photo_url'),currentRoom:text('current_room'),lastSeen:integer('last_seen').notNull().default(0)});
+export const players=sqliteTable('players',{id:text('id').primaryKey(),token:text('token').notNull().unique(),googleUid:text('google_uid').unique(),name:text('name').notNull(),photoUrl:text('photo_url'),currentRoom:text('current_room'),lastSeen:integer('last_seen').notNull().default(0)});
+export const playerTokens=sqliteTable('player_tokens',{token:text('token').primaryKey(),playerId:text('player_id').notNull()},t=>[index('idx_player_tokens_player').on(t.playerId)]);
 export const rooms=sqliteTable('rooms',{id:text('id').primaryKey(),name:text('name').notNull(),code:text('code').notNull().unique(),hostId:text('host_id').notNull(),createdAt:integer('created_at').notNull()});
 export const members=sqliteTable('members',{roomId:text('room_id').notNull(),playerId:text('player_id').notNull()},t=>[primaryKey({columns:[t.roomId,t.playerId]}),index('idx_members_player').on(t.playerId)]);
 export const games=sqliteTable('games',{id:text('id').primaryKey(),roomId:text('room_id').notNull(),startedAt:integer('started_at').notNull(),endedAt:integer('ended_at')},t=>[index('idx_games_room_started').on(t.roomId,t.startedAt)]);
