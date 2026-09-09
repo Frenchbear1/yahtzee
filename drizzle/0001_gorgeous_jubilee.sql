@@ -1,0 +1,1 @@
+ALTER TABLE `players` ADD `last_seen` integer DEFAULT 0 NOT NULL;

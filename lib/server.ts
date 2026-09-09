@@ -3,8 +3,9 @@ type DB = {prepare:(q:string)=>any;batch:(s:any[])=>Promise<any[]>};
 class APIError extends Error {constructor(message:string,public status=400){super(message)}}
 const fail=(message:string,status=400):never=>{throw new APIError(message,status)};
 const id=()=>crypto.randomUUID();
-const code=()=>Array.from(crypto.getRandomValues(new Uint8Array(8)),n=>'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[n%32]).join('');
+const code=()=>Array.from(crypto.getRandomValues(new Uint8Array(4)),n=>'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[n%32]).join('');
 const clean=(s:unknown,fallback:string)=>typeof s==='string'&&s.trim()?s.trim().slice(0,32):fallback;
+async function shortenCode(db:DB,room:any){if(!room||room.code.length<=4)return;for(let i=0;i<5;i++){const next=code();try{const changed=await db.prepare('UPDATE rooms SET code=? WHERE id=? AND NOT EXISTS (SELECT 1 FROM rooms WHERE code=?)').bind(next,room.id,next).run();if(changed.meta?.changes){room.code=next;return}}catch{}}}
 export async function handleGame(request:Request,db:DB,mode='online'){
  const json=(d:any,status=200)=>Response.json(d,{status,headers:{'Cache-Control':'no-store'}});
  try{
@@ -14,17 +15,20 @@ export async function handleGame(request:Request,db:DB,mode='online'){
   const raw=await request.text();if(raw.length>12000)fail('Request too large.',413);
   const b=JSON.parse(raw);if(!b||typeof b!=='object')fail('Invalid request.');
   const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token))),b=>b.toString(16).padStart(2,'0')).join('');
-  let me=await db.prepare('SELECT id,name,current_room FROM players WHERE token=?').bind(hash).first();
+  const seenAt=Date.now();let me=await db.prepare('SELECT id,name,current_room FROM players WHERE token=?').bind(hash).first();
   if(!me){if(b.action!=='bootstrap')fail('Reconnect your player profile.',401);const pid=id(),rid=id(),gid=id(),now=Date.now();
-   await db.batch([db.prepare('INSERT INTO players (id,token,name,current_room) VALUES (?,?,?,?)').bind(pid,hash,'You',rid),db.prepare('INSERT INTO rooms (id,name,code,host_id,created_at) VALUES (?,?,?,?,?)').bind(rid,'My table',code(),pid,now),db.prepare('INSERT INTO members (room_id,player_id) VALUES (?,?)').bind(rid,pid),db.prepare('INSERT INTO games (id,room_id,started_at) VALUES (?,?,?)').bind(gid,rid,now),db.prepare('INSERT INTO sheets (game_id,player_id) VALUES (?,?)').bind(gid,pid)]);me={id:pid,name:'You',current_room:rid};
+   await db.batch([db.prepare('INSERT INTO players (id,token,name,current_room,last_seen) VALUES (?,?,?,?,?)').bind(pid,hash,'You',rid,now),db.prepare('INSERT INTO rooms (id,name,code,host_id,created_at) VALUES (?,?,?,?,?)').bind(rid,'My table',code(),pid,now),db.prepare('INSERT INTO members (room_id,player_id) VALUES (?,?)').bind(rid,pid),db.prepare('INSERT INTO games (id,room_id,started_at) VALUES (?,?,?)').bind(gid,rid,now),db.prepare('INSERT INTO sheets (game_id,player_id) VALUES (?,?)').bind(gid,pid)]);me={id:pid,name:'You',current_room:rid};
   }
+  await db.prepare('UPDATE players SET last_seen=? WHERE id=?').bind(seenAt,me.id).run();
   const snapshot=async()=>{
    const room=await db.prepare('SELECT id,name,code,host_id FROM rooms WHERE id=?').bind(me.current_room).first();
+   if(room?.host_id===me.id)await shortenCode(db,room);
    const roomRows=await db.prepare('SELECT r.id,r.name,r.code,r.host_id FROM rooms r JOIN members m ON r.id=m.room_id WHERE m.player_id=? ORDER BY r.created_at DESC').bind(me.id).all();
+   const playerRows=await db.prepare('SELECT p.id,p.name,p.current_room,p.last_seen FROM players p JOIN members m ON m.player_id=p.id WHERE m.room_id=? ORDER BY p.name').bind(me.current_room).all();
    const gs=await db.prepare('SELECT * FROM games WHERE room_id=? ORDER BY started_at DESC').bind(me.current_room).all();
    const ss=await db.prepare('SELECT s.*,p.name FROM sheets s JOIN players p ON p.id=s.player_id WHERE s.game_id IN (SELECT id FROM games WHERE room_id=? ORDER BY started_at DESC)').bind(me.current_room).all();
    const history=gs.results.map((g:any)=>({...g,sheets:ss.results.filter((s:any)=>s.game_id===g.id).map((s:any)=>({...s,scores:JSON.parse(s.scores)}))}));
-   return{me:{id:me.id,name:me.name},room,rooms:roomRows.results,game:history[0],history,mode};
+   return{me:{id:me.id,name:me.name},room,rooms:roomRows.results,players:playerRows.results.map((p:any)=>({id:p.id,name:p.name,active:p.current_room===me.current_room&&seenAt-p.last_seen<15000})),game:history[0],history,mode};
   };
   if(b.action==='rename'){
    const name=clean(b.name,'You');await db.prepare('UPDATE players SET name=? WHERE id=?').bind(name,me.id).run();me.name=name;
@@ -55,8 +59,10 @@ export async function handleGame(request:Request,db:DB,mode='online'){
    const g=await db.prepare('SELECT * FROM games WHERE room_id=? ORDER BY started_at DESC LIMIT 1').bind(me.current_room).first();
    if(g.id!==b.gameId)fail('A new game has already started. Your table is refreshed.',409);
    if(!g.ended_at&&!b.confirm)fail('There are unfinished score sheets. Confirm to start a fresh game.');
-   const gid=id();const created=await db.batch([db.prepare('INSERT INTO games (id,room_id,started_at) SELECT ?,?,? WHERE (SELECT id FROM games WHERE room_id=? ORDER BY started_at DESC LIMIT 1)=?').bind(gid,me.current_room,Date.now(),me.current_room,g.id),db.prepare('INSERT INTO sheets (game_id,player_id) SELECT ?,player_id FROM members WHERE room_id=? AND EXISTS (SELECT 1 FROM games WHERE id=?)').bind(gid,me.current_room,gid)]);if(!created[0].meta?.changes)fail('A new game has already started. Your table is refreshed.',409);
+   const gid=id(),started=Date.now();const created=await db.batch([db.prepare('INSERT INTO games (id,room_id,started_at) SELECT ?,?,? WHERE (SELECT id FROM games WHERE room_id=? ORDER BY started_at DESC LIMIT 1)=?').bind(gid,me.current_room,started,me.current_room,g.id),db.prepare('INSERT INTO sheets (game_id,player_id) SELECT ?,m.player_id FROM members m JOIN players p ON p.id=m.player_id WHERE m.room_id=? AND (m.player_id=? OR (p.current_room=? AND p.last_seen>=?)) AND EXISTS (SELECT 1 FROM games WHERE id=?)').bind(gid,me.current_room,me.id,me.current_room,started-15000,gid)]);if(!created[0].meta?.changes)fail('A new game has already started. Your table is refreshed.',409);
   }else if(b.action!=='bootstrap'&&b.action!=='refresh'){fail('Unknown action.');}
+  const current=await db.prepare('SELECT id FROM games WHERE room_id=? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1').bind(me.current_room).first();
+  if(current)await db.prepare('INSERT OR IGNORE INTO sheets (game_id,player_id) SELECT ?,? WHERE EXISTS (SELECT 1 FROM members WHERE room_id=? AND player_id=?)').bind(current.id,me.id,me.current_room,me.id).run();
   return json(await snapshot());
  }catch(e){if(e instanceof APIError)return json({error:e.message},e.status);if(e instanceof SyntaxError)return json({error:'That request could not be read.'},400);console.error('Game request failed',e);return json({error:'Your table is temporarily unavailable. Your unsaved input is still here; please try again.'},503);}
 }
