@@ -1,31 +1,31 @@
 {
   "name": "Yahtzee",
   "short_name": "Yahtzee",
-  "start_url": "/",
+  "start_url": "./",
   "display": "standalone",
   "background_color": "#f4f6f8",
   "theme_color": "#245748",
   "icons": [
     {
-      "src": "/icons/yahtzee-192.png",
+      "src": "icons/yahtzee-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icons/yahtzee-512.png",
+      "src": "icons/yahtzee-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icons/yahtzee-maskable-512.png",
+      "src": "icons/yahtzee-maskable-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
     }
   ],
-  "id": "/",
-  "scope": "/",
-  "description": "Quick Yahtzee scoring, shared family tables, and game history."
+  "id": "./",
+  "scope": "./",
+  "description": "Quick Yahtzee scoring and game history."
 }

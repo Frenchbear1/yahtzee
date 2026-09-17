@@ -6,6 +6,10 @@ Family tables share scores every four seconds. Each game has a stable ID and ser
 
 Online scores use the Sites D1 database. Each browser holds a random player credential; the database holds only its SHA-256 hash. Clearing browser storage creates a new identity. The hosted Site's access settings apply before table access. A room code grants access to that table and its history, so share it only with your group.
 
+## GitHub Pages edition
+
+The public GitHub Pages build is a static, single-browser scorekeeper. Scores, tables, and history are saved in browser local storage. Clearing site data clears that history. GitHub Pages cannot run the database-backed shared-family API; use the downloadable local network edition below for multi-device play.
+
 ## Local network edition
 
 Choose **Family table → Download the local edition** in the app. Unzip on one computer with Node 22.13 or newer and run `node start.mjs`. Every phone opens the host's displayed LAN address and joins the same table code. The computer must remain awake. No internet or accounts are required during play.
@@ -15,6 +19,7 @@ The local edition uses the same React UI and API logic with a local SQLite adapt
 ## Development
 
 - `node scripts/build-local.mjs` builds the downloadable edition from the current UI and API source.
+- `npm run build:pages` builds the static GitHub Pages edition into `.pages-dist`.
 - `npm run build` builds the hosted Worker and UI.
 - `npm run db:generate` generates schema migrations after a schema edit.
 - `node tests/game-api.mjs` validates the compiled local API against an in-memory SQLite database. Build the local edition first.
