@@ -8,7 +8,7 @@ Online scores use the Sites D1 database. Each browser holds a random player cred
 
 ## GitHub Pages edition
 
-The public GitHub Pages build is a static, single-browser scorekeeper. Scores, tables, and history are saved in browser local storage. Clearing site data clears that history. GitHub Pages cannot run the database-backed shared-family API; use the downloadable local network edition below for multi-device play.
+GitHub Pages hosts the public interface while the Sites deployment runs the authenticated API and D1 database. Google profiles, shared family tables, scores, leaderboards, and history work across both URLs. Server credentials and game data stay outside the public repository.
 
 ## Local network edition
 
