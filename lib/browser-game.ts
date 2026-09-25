@@ -25,6 +25,15 @@ function clean(value: unknown, fallback: string) {
   return result || fallback;
 }
 
+function cleanPhoto(value: unknown) {
+  try {
+    const url = new URL(String(value ?? ''));
+    return url.protocol === 'https:' && (url.hostname === 'googleusercontent.com' || url.hostname.endsWith('.googleusercontent.com')) ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 function fail(message: string, status = 400): never {
   const error = new Error(message) as Error & { status?: number };
   error.status = status;
@@ -114,6 +123,13 @@ export async function browserGameRequest(body: Record<string, unknown>): Promise
   if (action === 'rename') {
     store.me.name = clean(body.name, 'You');
     for (const game of store.games) for (const playerSheet of game.sheets) playerSheet.name = store.me.name;
+  } else if (action === 'sync-profile') {
+    store.me.name = clean(body.name, store.me.name || 'You');
+    store.me.photo_url = cleanPhoto(body.photoUrl);
+    for (const game of store.games) for (const playerSheet of game.sheets) {
+      playerSheet.name = store.me.name;
+      playerSheet.photo_url = store.me.photo_url;
+    }
   } else if (action === 'create-room') {
     createRoom(store, body.name);
   } else if (action === 'rename-room') {

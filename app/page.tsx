@@ -110,7 +110,8 @@ export default function Home() {
   const score = totals(sheet?.scores, sheet?.bonus);
   const host = state?.room.host_id === me?.id;
   const browserMode = state?.mode === 'browser' || pagesBuild;
-  const mode = state?.mode === 'lan' || browserMode;
+  const lanMode = state?.mode === 'lan';
+  const mode = lanMode || browserMode;
   const plans = useMemo(() => bonusPlans(sheet?.scores || {}, 3), [sheet?.scores]);
   const activePlan = bonusPlanIndex >= 0 && plans.length ? plans[bonusPlanIndex % plans.length] : null;
   const bonusNeeded = Math.max(0, 63 - score.upper);
@@ -275,7 +276,7 @@ export default function Home() {
   }, [api]);
 
   useEffect(() => {
-    if (mode) return;
+    if (lanMode) return;
     let stopped = false;
     let unsubscribe: (() => void) | undefined;
     void watchGoogleAccount(async user => {
@@ -296,7 +297,7 @@ export default function Home() {
       }
     }).then(stop => { unsubscribe = stop; }).catch(caught => setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not load.'));
     return () => { stopped = true; unsubscribe?.(); };
-  }, [api, mode]);
+  }, [api, lanMode]);
 
   useEffect(() => {
     if (modal !== 'finish') return;
@@ -585,7 +586,8 @@ export default function Home() {
       <DialogContent className="modal">
         {modal === 'profile' && <>
           <DialogHeader><DialogTitle>Profile</DialogTitle></DialogHeader>
-          {!mode && <div className="google-auth">{googleUser ? <><div className="google-account"><Avatar name={googleUser.displayName || googleUser.email || 'G'} photoUrl={googleUser.photoURL} /><span><strong>{googleUser.displayName || 'Google account'}</strong><small>{googleUser.email}</small></span></div><button className="btn" disabled={authBusy} onClick={async () => { try { setAuthBusy(true); await signOutGoogle(); googleUserRef.current = null; setGoogleUser(null); setAccountError(''); } catch (caught) { setAccountError(caught instanceof Error ? caught.message : 'Could not sign out.'); } finally { setAuthBusy(false); } }}><LogOut size={15} />Sign out</button></> : <button className="btn google-btn" disabled={authBusy} onClick={async () => { try { setAuthBusy(true); await signInWithGoogle(); } catch (caught) { setAccountError(caught instanceof Error ? caught.message : 'Google sign-in was canceled.'); } finally { setAuthBusy(false); } }}><span className="google-g">G</span>{authBusy ? 'Opening Google…' : 'Sign in with Google'}</button>}</div>}
+          {!lanMode && <div className="google-auth">{googleUser ? <><div className="google-account"><Avatar name={googleUser.displayName || googleUser.email || 'G'} photoUrl={googleUser.photoURL} /><span><strong>{googleUser.displayName || 'Google account'}</strong><small>{googleUser.email}</small></span></div><button className="btn" disabled={authBusy} onClick={async () => { try { setAuthBusy(true); await signOutGoogle(); googleUserRef.current = null; setGoogleUser(null); setAccountError(''); } catch (caught) { setAccountError(caught instanceof Error ? caught.message : 'Could not sign out.'); } finally { setAuthBusy(false); } }}><LogOut size={15} />Sign out</button></> : <button className="btn google-btn" disabled={authBusy} onClick={async () => { try { setAuthBusy(true); await signInWithGoogle(); } catch (caught) { setAccountError(caught instanceof Error ? caught.message : 'Google sign-in was canceled.'); } finally { setAuthBusy(false); } }}><span className="google-g">G</span>{authBusy ? 'Opening Google…' : 'Sign in with Google'}</button>}</div>}
+          {browserMode && <p className="install-note">Google sign-in uses your name and photo. Scores and history still stay in this browser.</p>}
           {accountError && <div role="alert" className="inline-error account-error">{accountError} {googleUser && <button className="text-btn" disabled={authBusy} onClick={() => void retryGoogleSync()}>Try again</button>}</div>}
           <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'rename', name: profileName }); if (next) setModal(null); }}><label className="field-label" htmlFor="player-name">Player name</label><input id="player-name" className="field" autoFocus maxLength={32} placeholder="David" value={profileName} onChange={event => setProfileName(event.target.value)} required /><button className="btn primary" style={{ width: '100%', marginTop: 15 }} disabled={busy || !profileName.trim()}>Save<Check size={16} /></button></form>
           {!!state?.managedRooms.length && <button className="btn manage-button" onClick={openRoomManagement}><Settings size={16} />Manage tables</button>}

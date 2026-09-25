@@ -4,7 +4,7 @@ A mobile-first Yahtzee scorekeeper with a two-column score sheet, valid quick sc
 
 ## GitHub Pages edition
 
-The public GitHub Pages build is a static, single-browser scorekeeper. Scores, tables, and history are saved in browser local storage. Clearing site data clears that history. Use the downloadable local network edition below for multi-device play.
+The public GitHub Pages build is a static, single-browser scorekeeper. Google sign-in supplies the player's name and profile photo, while scores, tables, and history are saved in browser local storage. Signing in does not sync game history between devices, and clearing site data clears that history. Use the downloadable local network edition below for multi-device play.
 
 ## Local network edition
 
