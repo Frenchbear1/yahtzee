@@ -13,6 +13,7 @@ import { Progress } from '@/components/ui/progress';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Toaster, toast } from 'sonner';
 import { bonusPlans, categories, leaderboard, totals, type Category, type Game, type State } from '@/lib/game';
+import { browserGameRequest } from '@/lib/browser-game';
 import { getGoogleIdToken, signInWithGoogle, signOutGoogle, watchGoogleAccount, type GoogleAccount } from '@/lib/firebase-profile';
 
 const icons = [Dice1, Dice2, Dice3, Dice4, Dice5, Dice6, Layers, Layers, House, TrendingUp, ArrowUpRight, Star, Dices];
@@ -65,6 +66,7 @@ type OptimisticMutation = { id: number; body: Record<string, unknown>; gameId: s
 type DeleteTarget = { kind: 'game' | 'room'; id: string; name: string };
 
 export default function Home() {
+  const pagesBuild = typeof window !== 'undefined' && window.__YAHTZEE_PAGES__ === true;
   const [state, setState] = useState<State | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -107,7 +109,8 @@ export default function Home() {
   const sheet = game?.sheets.find(item => item.player_id === me?.id);
   const score = totals(sheet?.scores, sheet?.bonus);
   const host = state?.room.host_id === me?.id;
-  const mode = state?.mode === 'lan';
+  const browserMode = state?.mode === 'browser' || pagesBuild;
+  const mode = state?.mode === 'lan' || browserMode;
   const plans = useMemo(() => bonusPlans(sheet?.scores || {}, 3), [sheet?.scores]);
   const activePlan = bonusPlanIndex >= 0 && plans.length ? plans[bonusPlanIndex % plans.length] : null;
   const bonusNeeded = Math.max(0, 63 - score.upper);
@@ -128,13 +131,13 @@ export default function Home() {
   }, []);
 
   const requestState = useCallback(async (data: Record<string, unknown>, playerToken = token.current): Promise<State> => {
+    if (typeof window !== 'undefined' && window.__YAHTZEE_PAGES__) return browserGameRequest(data);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
       let googleToken = '';
       try { if (googleUserRef.current) googleToken = await getGoogleIdToken(googleUserRef.current); } catch {}
-      const apiOrigin = typeof window !== 'undefined' ? window.__YAHTZEE_API_ORIGIN__ || '' : '';
-      const response = await fetch(`${apiOrigin}/api/game`, {
+      const response = await fetch('/api/game', {
         signal: controller.signal,
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-player-token': playerToken, ...(googleToken ? { Authorization: `Bearer ${googleToken}` } : {}) },
@@ -384,14 +387,10 @@ export default function Home() {
 
   async function shareTable() {
     if (!state) return;
-    const url = new URL(window.location.href);
-    url.search = '';
-    url.hash = '';
-    url.searchParams.set('table', state.room.code);
-    const shareUrl = url.toString();
+    const url = `${window.location.origin}/?table=${state.room.code}`;
     try {
-      if (navigator.share) await navigator.share({ title: 'Join my Yahtzee table', text: `Join my Yahtzee table with code ${state.room.code}.`, url: shareUrl });
-      else { await navigator.clipboard.writeText(shareUrl); toast.success('Table link copied'); }
+      if (navigator.share) await navigator.share({ title: 'Join my Yahtzee table', text: `Join my Yahtzee table with code ${state.room.code}.`, url });
+      else { await navigator.clipboard.writeText(url); toast.success('Table link copied'); }
     } catch (caught) {
       if (!(caught instanceof DOMException) || caught.name !== 'AbortError') toast.error('The table link could not be shared.');
     }
@@ -545,7 +544,7 @@ export default function Home() {
                 <div className="table-body">
                   {live.map((playerSheet, index) => <div className="player-row" key={playerSheet.player_id}><span className="player-rank">{index + 1}</span><Avatar name={playerSheet.name} photoUrl={playerSheet.photo_url} /><span className="player-name">{playerSheet.name}{playerSheet.player_id === me?.id && playerSheet.name !== 'You' ? ' (you)' : ''}<small>{playerSheet.completed_at ? 'Finished' : <><Count value={totals(playerSheet.scores, playerSheet.bonus).remaining} /> left</>}</small></span><span className="player-score"><Count value={totals(playerSheet.scores, playerSheet.bonus).total} /></span></div>)}
                   <div className="listening"><span />Listening · <Count value={state?.players.filter(player => player.active).length || 1} /> here</div>
-                  <button className="btn" onClick={() => setModal('family')} disabled={!state}><Plus size={15} />Invite player</button>
+                  <button className="btn" onClick={() => setModal('family')} disabled={!state}>{browserMode ? <><Layers size={15} />Tables</> : <><Plus size={15} />Invite player</>}</button>
                   {score.filled === 13 && <button className="btn primary" onClick={() => setModal('finish')}><Trophy size={15} />Final score</button>}
                 </div>
               </section>
@@ -605,17 +604,17 @@ export default function Home() {
         </>}
 
         {modal === 'family' && <>
-          <DialogHeader><DialogTitle>Your family table</DialogTitle><DialogDescription>{mode ? 'Everyone opens the address shown on the host computer, then joins with this code.' : 'Share the table. The code will already be filled in when the link opens.'}</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>{browserMode ? 'Your browser tables' : 'Your family table'}</DialogTitle><DialogDescription>{browserMode ? 'This GitHub Pages edition saves scores and history only in this browser.' : mode ? 'Everyone opens the address shown on the host computer, then joins with this code.' : 'Share the table. The code will already be filled in when the link opens.'}</DialogDescription></DialogHeader>
           {me?.name === 'You' && <button className="btn" onClick={() => { setProfileName(''); setModal('profile'); }}>First, add your name<ArrowRight size={15} /></button>}
-          {state && <><div className="room-code">{state.room.code}</div>{!mode && <button className="btn primary share-table" onClick={() => void shareTable()}><Share2 size={16} />Share table</button>}</>}
-          <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'join-room', code: joinCode }); if (next) { setModal(null); setJoinCode(''); setTab('sheet'); toast.success('You’re at the table.'); } }}><label className="field-label" htmlFor="join-code">Table code</label><div className="inline"><input id="join-code" className="field" placeholder="ABCD" autoCapitalize="characters" autoCorrect="off" maxLength={8} value={joinCode} onChange={event => setJoinCode(event.target.value.toUpperCase())} /><button className="btn primary" disabled={busy || ![4, 8].includes(joinCode.replace(/[^a-z0-9]/gi, '').length)}>Join<ArrowRight size={14} /></button></div></form>
+          {state && !browserMode && <><div className="room-code">{state.room.code}</div>{!mode && <button className="btn primary share-table" onClick={() => void shareTable()}><Share2 size={16} />Share table</button>}</>}
+          {!browserMode && <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'join-room', code: joinCode }); if (next) { setModal(null); setJoinCode(''); setTab('sheet'); toast.success('You’re at the table.'); } }}><label className="field-label" htmlFor="join-code">Table code</label><div className="inline"><input id="join-code" className="field" placeholder="ABCD" autoCapitalize="characters" autoCorrect="off" maxLength={8} value={joinCode} onChange={event => setJoinCode(event.target.value.toUpperCase())} /><button className="btn primary" disabled={busy || ![4, 8].includes(joinCode.replace(/[^a-z0-9]/gi, '').length)}>Join<ArrowRight size={14} /></button></div></form>}
           {error && <div role="alert" className="inline-error">{error}</div>}
           <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'create-room', name: tableName }); if (next) { toast.success('Your new table is ready. Share the code above.'); setTab('sheet'); } }}><label className="field-label" htmlFor="table-name">Start a separate table</label><div className="inline"><input className="field" id="table-name" value={tableName} onChange={event => setTableName(event.target.value)} maxLength={32} required /><button className="btn" disabled={busy || !tableName.trim()}>Create</button></div></form>
           {state && state.rooms.length > 1 && <div className="room-list section-divider"><h3 className="field-label">Your tables</h3>{state.rooms.map(room => <button key={room.id} className="btn" disabled={busy || room.id === state.room.id} onClick={async () => { if (await api({ action: 'switch-room', roomId: room.id })) { setModal(null); setTab('sheet'); } }}>{room.name}{room.id === state.room.id ? <Check size={14} /> : <ArrowRight size={14} />}</button>)}</div>}
         </>}
 
         {modal === 'new' && <><DialogHeader><DialogTitle>Start a new game?</DialogTitle><DialogDescription>This game isn’t finished. Starting over will save it as unfinished.</DialogDescription></DialogHeader><div className="actions"><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy || !host} onClick={() => void beginNewGame()}>Start new game<ArrowRight size={15} /></button></div>{error && <p className="inline-error">{error}</p>}</>}
-        {modal === 'finish' && <><DialogHeader><DialogTitle>Final score</DialogTitle><DialogDescription>{me?.name === 'You' ? 'Your' : `${firstName(me?.name || 'Your')}’s`} final score · {game ? fmtDate(game.started_at) : ''}</DialogDescription></DialogHeader><div><div className="finish-line"><span>Upper section</span><strong><Count value={score.upper} /></strong></div>{phase >= 1 && <div className="finish-line"><span>Upper bonus</span><strong>{score.upperBonus ? <>+<Count value={35} /></> : <Count value={0} />}</strong></div>}{phase >= 2 && <div className="finish-line"><span>Lower section {sheet?.bonus ? '(includes Yahtzee bonus)' : ''}</span><strong><Count value={score.lower} /></strong></div>}</div><div className="finish-score"><p>GRAND TOTAL</p><strong><Count value={phase >= 3 ? score.total : 0} duration={700} /></strong></div><p className="install-note">{game?.ended_at ? 'Saved with everyone’s scores in game history.' : 'Your score is saved. The table result will be final when everyone finishes.'}</p><div className="actions"><button className="btn" onClick={() => { setModal(null); setTab('history'); }}>Game history</button>{host ? <button className="btn primary" onClick={requestNewGame}>Play again<ArrowRight size={15} /></button> : <button className="btn primary" onClick={() => setModal(null)}>Back to the table</button>}</div></>}
+        {modal === 'finish' && <><DialogHeader><DialogTitle>Final score</DialogTitle><DialogDescription>{me?.name === 'You' ? 'Your' : `${firstName(me?.name || 'Your')}’s`} final score · {game ? fmtDate(game.started_at) : ''}</DialogDescription></DialogHeader><div><div className="finish-line"><span>Upper section</span><strong><Count value={score.upper} /></strong></div>{phase >= 1 && <div className="finish-line"><span>Upper bonus</span><strong>{score.upperBonus ? <>+<Count value={35} /></> : <Count value={0} />}</strong></div>}{phase >= 2 && <div className="finish-line"><span>Lower section {sheet?.bonus ? '(includes Yahtzee bonus)' : ''}</span><strong><Count value={score.lower} /></strong></div>}</div><div className="finish-score"><p>GRAND TOTAL</p><strong><Count value={phase >= 3 ? score.total : 0} duration={700} /></strong></div><p className="install-note">{browserMode ? 'Saved in this browser’s local game history.' : game?.ended_at ? 'Saved with everyone’s scores in game history.' : 'Your score is saved. The table result will be final when everyone finishes.'}</p><div className="actions"><button className="btn" onClick={() => { setModal(null); setTab('history'); }}>Game history</button>{host ? <button className="btn primary" onClick={requestNewGame}>Play again<ArrowRight size={15} /></button> : <button className="btn primary" onClick={() => setModal(null)}>Back to the table</button>}</div></>}
       </DialogContent>
     </Dialog>
 
