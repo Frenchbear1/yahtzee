@@ -32,5 +32,11 @@ export function bonusPlans(scores:Scores={},limit=3){
  };
  visit(0,{},0,0,0);
  plans.sort((a,b)=>(a.points-needed)-(b.points-needed)||a.effort-b.effort||a.dice-b.dice);
- return plans.slice(0,Math.max(1,limit)).map(p=>p.plan);
+ // When only one upper category remains, one tap should show the minimum
+ // number of matching dice that can still earn the bonus. Extra plans only
+ // add noise in that case (for example, 3, 4, and 5 fours when 12 is needed).
+ const planLimit=open.length===1?1:Math.max(1,limit);
+ return plans.slice(0,planLimit).map(p=>p.plan);
 }
+
+export function gameHasMoves(game:Game){return game.sheets.some(sheet=>totals(sheet.scores,sheet.bonus).filled>0||sheet.bonus>0);}

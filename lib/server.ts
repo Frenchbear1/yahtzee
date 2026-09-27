@@ -115,7 +115,7 @@ export async function handleGame(request: Request, db: DB, mode = 'online', veri
       const accountHash = google ? Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`google:${google.uid}`))), byte => byte.toString(16).padStart(2, '0')).join('') : hash;
       const statements = [
         db.prepare('INSERT INTO players (id,token,google_uid,name,photo_url,current_room,last_seen) VALUES (?,?,?,?,?,?,?)').bind(playerId, accountHash, google?.uid || null, googleName, googlePhoto, roomId, now),
-        db.prepare('INSERT INTO rooms (id,name,code,host_id,created_at) VALUES (?,?,?,?,?)').bind(roomId, 'My table', code(), playerId, now),
+        db.prepare('INSERT INTO rooms (id,name,code,host_id,created_at) VALUES (?,?,?,?,?)').bind(roomId, 'My game', code(), playerId, now),
         db.prepare('INSERT INTO members (room_id,player_id) VALUES (?,?)').bind(roomId, playerId),
         db.prepare('INSERT INTO games (id,room_id,started_at) VALUES (?,?,?)').bind(gameId, roomId, now),
         db.prepare('INSERT INTO sheets (game_id,player_id) VALUES (?,?)').bind(gameId, playerId),
@@ -189,7 +189,7 @@ export async function handleGame(request: Request, db: DB, mode = 'online', veri
     } else if (body.action === 'create-room') {
       const roomId = id(), gameId = id(), now = Date.now();
       await db.batch([
-        db.prepare('INSERT INTO rooms (id,name,code,host_id,created_at) VALUES (?,?,?,?,?)').bind(roomId, clean(body.name, 'Family table'), code(), me.id, now),
+        db.prepare('INSERT INTO rooms (id,name,code,host_id,created_at) VALUES (?,?,?,?,?)').bind(roomId, clean(body.name, 'Family game'), code(), me.id, now),
         db.prepare('INSERT INTO members (room_id,player_id) VALUES (?,?)').bind(roomId, me.id),
         db.prepare('INSERT INTO games (id,room_id,started_at) VALUES (?,?,?)').bind(gameId, roomId, now),
         db.prepare('INSERT INTO sheets (game_id,player_id) VALUES (?,?)').bind(gameId, me.id),
@@ -199,17 +199,17 @@ export async function handleGame(request: Request, db: DB, mode = 'online', veri
     } else if (body.action === 'rename-room') {
       const roomId = String(body.roomId || '');
       const room = await db.prepare('SELECT id,host_id FROM rooms WHERE id=?').bind(roomId).first();
-      if (!room) fail('That table was not found.', 404);
-      if (room.host_id !== me.id) fail('Only the table owner can rename it.', 403);
-      await db.prepare('UPDATE rooms SET name=? WHERE id=?').bind(clean(body.name, 'My table'), roomId).run();
+      if (!room) fail('That game was not found.', 404);
+      if (room.host_id !== me.id) fail('Only the game owner can rename it.', 403);
+      await db.prepare('UPDATE rooms SET name=? WHERE id=?').bind(clean(body.name, 'My game'), roomId).run();
     } else if (body.action === 'remove-member') {
       const roomId = String(body.roomId || ''), playerId = String(body.playerId || '');
       const room = await db.prepare('SELECT id,host_id FROM rooms WHERE id=?').bind(roomId).first();
-      if (!room) fail('That table was not found.', 404);
-      if (room.host_id !== me.id) fail('Only the table owner can manage its players.', 403);
-      if (!playerId || playerId === room.host_id) fail('The table owner cannot be removed.');
+      if (!room) fail('That game was not found.', 404);
+      if (room.host_id !== me.id) fail('Only the game owner can manage its players.', 403);
+      if (!playerId || playerId === room.host_id) fail('The game owner cannot be removed.');
       const member = await db.prepare('SELECT p.id,p.current_room FROM players p JOIN members m ON m.player_id=p.id WHERE p.id=? AND m.room_id=?').bind(playerId, roomId).first();
-      if (!member) fail('That player is no longer at this table.', 404);
+      if (!member) fail('That player is no longer in this game.', 404);
       const statements = [db.prepare('DELETE FROM members WHERE room_id=? AND player_id=?').bind(roomId, playerId)];
       if (member.current_room === roomId) {
         const alternate = await db.prepare('SELECT room_id FROM members WHERE player_id=? AND room_id<>? LIMIT 1').bind(playerId, roomId).first();
@@ -218,7 +218,7 @@ export async function handleGame(request: Request, db: DB, mode = 'online', veri
         } else {
           const fallbackRoom = id(), fallbackGame = id(), now = Date.now();
           statements.push(
-            db.prepare('INSERT INTO rooms (id,name,code,host_id,created_at) VALUES (?,?,?,?,?)').bind(fallbackRoom, 'My table', code(), playerId, now),
+            db.prepare('INSERT INTO rooms (id,name,code,host_id,created_at) VALUES (?,?,?,?,?)').bind(fallbackRoom, 'My game', code(), playerId, now),
             db.prepare('INSERT INTO members (room_id,player_id) VALUES (?,?)').bind(fallbackRoom, playerId),
             db.prepare('INSERT INTO games (id,room_id,started_at) VALUES (?,?,?)').bind(fallbackGame, fallbackRoom, now),
             db.prepare('INSERT INTO sheets (game_id,player_id) VALUES (?,?)').bind(fallbackGame, playerId),
@@ -230,8 +230,8 @@ export async function handleGame(request: Request, db: DB, mode = 'online', veri
     } else if (body.action === 'delete-room') {
       const roomId = String(body.roomId || '');
       const room = await db.prepare('SELECT id,host_id FROM rooms WHERE id=?').bind(roomId).first();
-      if (!room) fail('That table was not found.', 404);
-      if (room.host_id !== me.id) fail('Only the table owner can delete it.', 403);
+      if (!room) fail('That game was not found.', 404);
+      if (room.host_id !== me.id) fail('Only the game owner can delete it.', 403);
       const currentMembers = await db.prepare('SELECT p.id,p.current_room FROM players p JOIN members m ON m.player_id=p.id WHERE m.room_id=?').bind(roomId).all();
       const statements: any[] = [];
       let nextRoomForMe = me.current_room;
@@ -244,7 +244,7 @@ export async function handleGame(request: Request, db: DB, mode = 'online', veri
         } else {
           const fallbackRoom = id(), fallbackGame = id(), now = Date.now();
           statements.push(
-            db.prepare('INSERT INTO rooms (id,name,code,host_id,created_at) VALUES (?,?,?,?,?)').bind(fallbackRoom, 'My table', code(), member.id, now),
+            db.prepare('INSERT INTO rooms (id,name,code,host_id,created_at) VALUES (?,?,?,?,?)').bind(fallbackRoom, 'My game', code(), member.id, now),
             db.prepare('INSERT INTO members (room_id,player_id) VALUES (?,?)').bind(fallbackRoom, member.id),
             db.prepare('INSERT INTO games (id,room_id,started_at) VALUES (?,?,?)').bind(fallbackGame, fallbackRoom, now),
             db.prepare('INSERT INTO sheets (game_id,player_id) VALUES (?,?)').bind(fallbackGame, member.id),
@@ -265,7 +265,7 @@ export async function handleGame(request: Request, db: DB, mode = 'online', veri
       const room = body.action === 'join-room'
         ? await db.prepare('SELECT * FROM rooms WHERE code=?').bind(String(body.code || '').replace(/[^a-z0-9]/gi, '').toUpperCase()).first()
         : await db.prepare('SELECT r.* FROM rooms r JOIN members m ON r.id=m.room_id WHERE r.id=? AND m.player_id=?').bind(String(body.roomId || ''), me.id).first();
-      if (!room) fail('That table was not found. Check the four-letter code.');
+      if (!room) fail('That game was not found. Check the four-letter code.');
       const game = await db.prepare('SELECT * FROM games WHERE room_id=? ORDER BY started_at DESC LIMIT 1').bind(room.id).first();
       const statements = [
         db.prepare('INSERT OR IGNORE INTO members (room_id,player_id) VALUES (?,?)').bind(room.id, me.id),
@@ -305,7 +305,7 @@ export async function handleGame(request: Request, db: DB, mode = 'online', veri
       const gameId = String(body.gameId || '');
       const oldGame = await db.prepare('SELECT g.id,g.room_id,r.host_id FROM games g JOIN rooms r ON r.id=g.room_id WHERE g.id=?').bind(gameId).first();
       if (!oldGame) fail('That game was not found.', 404);
-      if (oldGame.host_id !== me.id) fail('Only the table owner can delete game history.', 403);
+      if (oldGame.host_id !== me.id) fail('Only the game owner can delete game history.', 403);
       const latest = await db.prepare('SELECT id FROM games WHERE room_id=? ORDER BY started_at DESC LIMIT 1').bind(oldGame.room_id).first();
       const statements = [
         db.prepare('DELETE FROM sheets WHERE game_id=?').bind(gameId),
@@ -321,16 +321,16 @@ export async function handleGame(request: Request, db: DB, mode = 'online', veri
       await db.batch(statements);
     } else if (body.action === 'new-game') {
       const room = await db.prepare('SELECT * FROM rooms WHERE id=?').bind(me.current_room).first();
-      if (room.host_id !== me.id) fail('The table host starts the next game.', 403);
+      if (room.host_id !== me.id) fail('The game host starts the next game.', 403);
       const game = await db.prepare('SELECT * FROM games WHERE room_id=? ORDER BY started_at DESC LIMIT 1').bind(me.current_room).first();
-      if (game.id !== body.gameId) fail('A new game has already started. Your table is refreshed.', 409);
+      if (game.id !== body.gameId) fail('A new game has already started. Your game is refreshed.', 409);
       if (!game.ended_at && !body.confirm) fail('There are unfinished score sheets. Confirm to start a fresh game.');
       const gameId = id(), started = Date.now();
       const created = await db.batch([
         db.prepare('INSERT INTO games (id,room_id,started_at) SELECT ?,?,? WHERE (SELECT id FROM games WHERE room_id=? ORDER BY started_at DESC LIMIT 1)=?').bind(gameId, me.current_room, started, me.current_room, game.id),
         db.prepare('INSERT INTO sheets (game_id,player_id) SELECT ?,m.player_id FROM members m JOIN players p ON p.id=m.player_id WHERE m.room_id=? AND (m.player_id=? OR (p.current_room=? AND p.last_seen>=?)) AND EXISTS (SELECT 1 FROM games WHERE id=?)').bind(gameId, me.current_room, me.id, me.current_room, started - 15000, gameId),
       ]);
-      if (!created[0].meta?.changes) fail('A new game has already started. Your table is refreshed.', 409);
+      if (!created[0].meta?.changes) fail('A new game has already started. Your game is refreshed.', 409);
     } else if (body.action !== 'bootstrap' && body.action !== 'refresh') {
       fail('Unknown action.');
     }
@@ -342,6 +342,6 @@ export async function handleGame(request: Request, db: DB, mode = 'online', veri
     if (error instanceof APIError) return json({ error: error.message }, error.status);
     if (error instanceof SyntaxError) return json({ error: 'That request could not be read.' }, 400);
     console.error('Game request failed', error);
-    return json({ error: 'Your table is temporarily unavailable. Your unsaved input is still here; please try again.' }, 503);
+    return json({ error: 'Your game is temporarily unavailable. Your unsaved input is still here; please try again.' }, 503);
   }
 }

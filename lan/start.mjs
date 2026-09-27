@@ -22,7 +22,7 @@ const server=createServer((req,res)=>{
  const url=new URL(req.url,'http://local.table');
  if(url.pathname==='/api/game'&&req.method==='POST'){
   let body='',size=0;req.on('data',chunk=>{size+=chunk.length;if(size>12000){res.writeHead(413);res.end('Request too large');req.destroy();return}body+=chunk});
-  req.on('end',()=>{queue=queue.then(async()=>{const request=new Request('http://local.table/api/game',{method:'POST',headers:{'Content-Type':'application/json','x-player-token':String(req.headers['x-player-token']||'')},body});const result=await handleGame(request,db,'lan');res.writeHead(result.status,Object.fromEntries(result.headers));res.end(await result.text())}).catch(e=>{console.error(e);if(!res.headersSent)res.writeHead(500);res.end('Table unavailable. Please try again.')})});return;
+  req.on('end',()=>{queue=queue.then(async()=>{const request=new Request('http://local.table/api/game',{method:'POST',headers:{'Content-Type':'application/json','x-player-token':String(req.headers['x-player-token']||'')},body});const result=await handleGame(request,db,'lan');res.writeHead(result.status,Object.fromEntries(result.headers));res.end(await result.text())}).catch(e=>{console.error(e);if(!res.headersSent)res.writeHead(500);res.end('Game unavailable. Please try again.')})});return;
  }
  if(req.method!=='GET'&&req.method!=='HEAD'){res.writeHead(405);res.end();return}
  let path;try{path=resolve(publicPath,'.'+decodeURIComponent(url.pathname))}catch{res.writeHead(400);res.end();return}
@@ -33,10 +33,10 @@ const server=createServer((req,res)=>{
 });
 const port=Number(process.env.YAHTZEE_PORT||8787);
 server.listen(port,'0.0.0.0',()=>{
- console.log('\nYahtzee Table is ready. Keep this window open.\n');
+ console.log('\nYahtzee is ready. Keep this window open.\n');
  console.log(`On this computer: http://localhost:${port}`);
  try{for(const entries of Object.values(networkInterfaces()))for(const item of entries||[])if(item.family==='IPv4'&&!item.internal)console.log(`On your family's phones: http://${item.address}:${port}`)}catch{console.log(`For phones: find this computer's Wi-Fi IPv4 address in network settings, then open http://THAT-ADDRESS:${port}.`)}
- console.log('\nConnect everyone to the same Wi-Fi. Open Family table and share the table code.\nScores stay in yahtzee-scores.sqlite in this folder. Keep the folder to keep your history.\nPress Ctrl+C to close the table.\n');
+ console.log('\nConnect everyone to the same Wi-Fi. Tap Invite player on Home and share the invite code.\nScores stay in yahtzee-scores.sqlite in this folder. Keep the folder to keep your history.\nPress Ctrl+C to close the game host.\n');
 });
-server.on('error',e=>{console.error('Could not open the table:',e.message);process.exitCode=1});
+server.on('error',e=>{console.error('Could not open the game:',e.message);process.exitCode=1});
 process.on('SIGINT',()=>{server.close();sqlite.close();process.exit(0)});

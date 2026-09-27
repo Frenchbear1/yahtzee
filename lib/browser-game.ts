@@ -1,4 +1,4 @@
-import { totals, validScore, type Game, type Room, type Scores, type Sheet, type State } from './game';
+import { gameHasMoves, totals, validScore, type Game, type Room, type Scores, type Sheet, type State } from './game';
 
 type BrowserRoom = Room & { created_at: number };
 type BrowserStore = {
@@ -6,6 +6,11 @@ type BrowserStore = {
   me: State['me'];
   currentRoom: string;
   rooms: BrowserRoom[];
+  games: Game[];
+};
+
+export type BrowserCloudData = {
+  version: 1;
   games: Game[];
 };
 
@@ -59,7 +64,7 @@ function createStore(): BrowserStore {
     version: 1,
     me: { id: playerId, name: 'You', photo_url: null },
     currentRoom: roomId,
-    rooms: [{ id: roomId, name: 'My table', code: code(), host_id: playerId, created_at: now }],
+    rooms: [{ id: roomId, name: 'My game', code: code(), host_id: playerId, created_at: now }],
     games: [{ id: gameId, room_id: roomId, started_at: now, ended_at: null, sheets: [sheet(gameId, playerId, 'You')] }],
   };
 }
@@ -78,8 +83,69 @@ function saveStore(store: BrowserStore) {
   localStorage.setItem(storageKey, JSON.stringify(store));
 }
 
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function validCloudGame(value: unknown): value is Game {
+  if (!value || typeof value !== 'object') return false;
+  const game = value as Partial<Game>;
+  return typeof game.id === 'string' && typeof game.started_at === 'number' && Array.isArray(game.sheets)
+    && game.sheets.every(playerSheet => playerSheet && typeof playerSheet === 'object' && typeof playerSheet.game_id === 'string'
+      && typeof playerSheet.player_id === 'string' && typeof playerSheet.name === 'string' && typeof playerSheet.scores === 'object');
+}
+
+function preferredGame(first: Game, second: Game) {
+  const firstRevision = Math.max(0, ...first.sheets.map(playerSheet => Number(playerSheet.revision) || 0));
+  const secondRevision = Math.max(0, ...second.sheets.map(playerSheet => Number(playerSheet.revision) || 0));
+  if (secondRevision !== firstRevision) return secondRevision > firstRevision ? second : first;
+  const firstFilled = Math.max(0, ...first.sheets.map(playerSheet => totals(playerSheet.scores, playerSheet.bonus).filled));
+  const secondFilled = Math.max(0, ...second.sheets.map(playerSheet => totals(playerSheet.scores, playerSheet.bonus).filled));
+  if (secondFilled !== firstFilled) return secondFilled > firstFilled ? second : first;
+  return (second.ended_at || 0) > (first.ended_at || 0) ? second : first;
+}
+
+export function exportBrowserCloudData(): BrowserCloudData {
+  const store = loadStore();
+  return clone({ version: 1, games: store.games.filter(gameHasMoves) });
+}
+
+export function mergeBrowserCloudData(value: unknown, profile?: { name?: string | null; photoUrl?: string | null }) {
+  const store = loadStore();
+  const data = value as Partial<BrowserCloudData> | null;
+  const remoteGames = data?.version === 1 && Array.isArray(data.games) ? data.games.filter(validCloudGame).filter(gameHasMoves) : [];
+  const byId = new Map(store.games.map(game => [game.id, game]));
+  for (const remote of remoteGames) {
+    const normalized: Game = {
+      ...clone(remote),
+      room_id: store.currentRoom,
+      sheets: remote.sheets.map(playerSheet => ({
+        ...playerSheet,
+        game_id: remote.id,
+        player_id: store.me.id,
+        name: clean(profile?.name, playerSheet.name || store.me.name),
+        photo_url: cleanPhoto(profile?.photoUrl) || cleanPhoto(playerSheet.photo_url),
+      })),
+    };
+    const existing = byId.get(normalized.id);
+    byId.set(normalized.id, existing ? preferredGame(existing, normalized) : normalized);
+  }
+  if (profile) {
+    store.me.name = clean(profile.name, store.me.name || 'You');
+    store.me.photo_url = cleanPhoto(profile.photoUrl);
+  }
+  store.games = [...byId.values()];
+  const localCurrent = roomGames(store)[0];
+  const remoteCurrent = remoteGames.sort((a, b) => b.started_at - a.started_at)[0];
+  if (localCurrent && !gameHasMoves(localCurrent) && remoteCurrent && !remoteCurrent.ended_at) {
+    store.games = store.games.filter(game => game.id !== localCurrent.id);
+  }
+  saveStore(store);
+  return snapshot(store);
+}
+
 function currentRoom(store: BrowserStore) {
-  return store.rooms.find(room => room.id === store.currentRoom) || fail('That table was not found.', 404);
+  return store.rooms.find(room => room.id === store.currentRoom) || fail('That game was not found.', 404);
 }
 
 function roomGames(store: BrowserStore, roomId = store.currentRoom) {
@@ -111,7 +177,7 @@ function snapshot(store: BrowserStore): State {
 
 function createRoom(store: BrowserStore, name: unknown) {
   const roomId = id(), gameId = id(), now = Date.now();
-  store.rooms.push({ id: roomId, name: clean(name, 'My table'), code: code(), host_id: store.me.id, created_at: now });
+  store.rooms.push({ id: roomId, name: clean(name, 'My game'), code: code(), host_id: store.me.id, created_at: now });
   store.games.push({ id: gameId, room_id: roomId, started_at: now, ended_at: null, sheets: [sheet(gameId, store.me.id, store.me.name)] });
   store.currentRoom = roomId;
 }
@@ -133,23 +199,23 @@ export async function browserGameRequest(body: Record<string, unknown>): Promise
   } else if (action === 'create-room') {
     createRoom(store, body.name);
   } else if (action === 'rename-room') {
-    const room = store.rooms.find(item => item.id === String(body.roomId || '')) || fail('That table was not found.', 404);
-    room.name = clean(body.name, 'My table');
+    const room = store.rooms.find(item => item.id === String(body.roomId || '')) || fail('That game was not found.', 404);
+    room.name = clean(body.name, 'My game');
   } else if (action === 'delete-room') {
     const roomId = String(body.roomId || '');
-    if (!store.rooms.some(room => room.id === roomId)) fail('That table was not found.', 404);
+    if (!store.rooms.some(room => room.id === roomId)) fail('That game was not found.', 404);
     store.rooms = store.rooms.filter(room => room.id !== roomId);
     store.games = store.games.filter(game => game.room_id !== roomId);
-    if (!store.rooms.length) createRoom(store, 'My table');
+    if (!store.rooms.length) createRoom(store, 'My game');
     else if (store.currentRoom === roomId) store.currentRoom = [...store.rooms].sort((a, b) => b.created_at - a.created_at)[0].id;
   } else if (action === 'switch-room') {
     const roomId = String(body.roomId || '');
-    if (!store.rooms.some(room => room.id === roomId)) fail('That table was not found.', 404);
+    if (!store.rooms.some(room => room.id === roomId)) fail('That game was not found.', 404);
     store.currentRoom = roomId;
   } else if (action === 'join-room') {
     const wanted = String(body.code || '').replace(/[^a-z0-9]/gi, '').toUpperCase();
     const room = store.rooms.find(item => item.code === wanted);
-    if (!room) fail('Shared tables need a server. This Pages edition keeps scores only in this browser.');
+    if (!room) fail('Live shared games need the Wi-Fi edition. This Pages edition keeps multiplayer scores on one device.');
     store.currentRoom = room.id;
   } else if (action === 'score' || action === 'bonus') {
     const game = roomGames(store).find(item => item.id === String(body.gameId || '')) || fail('This score sheet is not available.', 404);
@@ -187,7 +253,7 @@ export async function browserGameRequest(body: Record<string, unknown>): Promise
     }
   } else if (action === 'new-game') {
     const latest = roomGames(store)[0];
-    if (!latest || latest.id !== String(body.gameId || '')) fail('A new game has already started. Your table is refreshed.', 409);
+    if (!latest || latest.id !== String(body.gameId || '')) fail('A new game has already started. Your game is refreshed.', 409);
     const gameId = id(), now = Date.now();
     store.games.push({ id: gameId, room_id: store.currentRoom, started_at: now, ended_at: null, sheets: [sheet(gameId, store.me.id, store.me.name)] });
   } else if (!['bootstrap', 'refresh'].includes(action)) {

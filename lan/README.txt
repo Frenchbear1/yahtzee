@@ -1,4 +1,4 @@
-YAHTZEE TABLE — LOCAL EDITION
+YAHTZEE — LOCAL EDITION
 
 One computer hosts. Everyone plays on their own phone. No internet or accounts needed during play.
 
@@ -9,15 +9,14 @@ SET UP ONCE
    On Windows, you can double-click Start-Windows.cmd instead.
 4. Keep that window open and the computer awake. If your firewall asks, allow access on your private home network.
 5. Connect the phones and computer to the same Wi-Fi. Open the phone address shown in the terminal.
-6. Each person taps their name at the top to set it. One person opens Family table and shares the code. Everyone else joins using that code.
+6. Each person taps their name at the top to set it. One person taps Invite player and shares the code. Everyone else joins using that code.
 
 PLAY
 Tap a category, then tap a score. Enter the five-dice total for 3/4 of a kind or Chance.
-Tap 0 to cross out a category. Tap any saved score to edit it. Undo reverses your last score.
-The 35-point upper bonus is automatic. Extra Yahtzees use the + button next to Yahtzee bonus.
-The big YAHTZEE button celebrates without changing points.
+Tap 0 to cross out a category. Tap any saved score to edit or clear it.
+The 35-point upper bonus is automatic. After scoring the first Yahtzee, tap YAHTZEE again to add each 100-point bonus.
 Everyone's scores refresh every four seconds. Complete all 13 categories for the animated final tally.
-Game history groups the same game's players by date and time. Leaderboard wins count only fully finished multiplayer games; ties share a win.
+After finishing, everyone returns Home. Game history groups the same game's players by date and time. Blank games never appear. Leaderboard wins count only fully finished multiplayer games; ties share a win.
 
 KEEP YOUR HISTORY
 Scores are saved in yahtzee-scores.sqlite next to start.mjs. This is separate from the online app.

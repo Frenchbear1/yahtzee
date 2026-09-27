@@ -14,6 +14,12 @@ type FirebaseCompat = {
     signInWithPopup: (provider: unknown) => Promise<{ user: FirebaseUser }>;
     signOut: () => Promise<void>;
   }) & { GoogleAuthProvider: new () => unknown };
+  firestore: () => {
+    doc: (path: string) => {
+      get: () => Promise<{ exists: boolean; data: () => unknown }>;
+      set: (data: unknown) => Promise<void>;
+    };
+  };
 };
 
 declare global {
@@ -59,6 +65,7 @@ async function firebase() {
     loading = (async () => {
       await loadScript(`https://www.gstatic.com/firebasejs/${sdkVersion}/firebase-app-compat.js`);
       await loadScript(`https://www.gstatic.com/firebasejs/${sdkVersion}/firebase-auth-compat.js`);
+      await loadScript(`https://www.gstatic.com/firebasejs/${sdkVersion}/firebase-firestore-compat.js`);
       if (!window.firebase) throw new Error('Google sign-in could not start.');
       if (!window.firebase.apps.length) window.firebase.initializeApp(firebaseConfig);
       return window.firebase;
@@ -85,4 +92,21 @@ export async function signOutGoogle() {
 
 export async function getGoogleIdToken(user: GoogleAccount, forceRefresh = false) {
   return user.getIdToken(forceRefresh);
+}
+
+function scoreDocument(userId: string) {
+  return `users/${userId}/yahtzee/state`;
+}
+
+export async function loadGoogleScores(userId: string) {
+  const sdk = await firebase();
+  const document = await sdk.firestore().doc(scoreDocument(userId)).get();
+  if (!document.exists) return null;
+  const value = document.data() as { state?: unknown } | undefined;
+  return value?.state ?? null;
+}
+
+export async function saveGoogleScores(userId: string, state: unknown) {
+  const sdk = await firebase();
+  await sdk.firestore().doc(scoreDocument(userId)).set({ state, updatedAt: Date.now() });
 }

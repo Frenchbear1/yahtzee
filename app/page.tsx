@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
   ArrowRight, ArrowUpRight, Check, ChevronDown, Dice1, Dice2, Dice3, Dice4, Dice5, Dice6,
-  Dices, Flag, History, House, Layers, LoaderCircle, LogIn, LogOut, NotebookPen,
-  Plus, RotateCcw, Settings, Share2, Sparkles, Star, Trash2, TrendingUp, Trophy, UserMinus, Users,
+  Cloud, Dices, Flag, History, Home as HomeIcon, House, Layers, LoaderCircle, LogIn, LogOut,
+  Play, Plus, Share2, Sparkles, Star, Trash2, TrendingUp, Trophy, UserPlus, Users, X,
 } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
@@ -12,9 +12,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Progress } from '@/components/ui/progress';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Toaster, toast } from 'sonner';
-import { bonusPlans, categories, leaderboard, totals, type Category, type Game, type State } from '@/lib/game';
-import { browserGameRequest } from '@/lib/browser-game';
-import { getGoogleIdToken, signInWithGoogle, signOutGoogle, watchGoogleAccount, type GoogleAccount } from '@/lib/firebase-profile';
+import { bonusPlans, categories, gameHasMoves, leaderboard, totals, type Category, type Game, type State } from '@/lib/game';
+import { browserGameRequest, exportBrowserCloudData, mergeBrowserCloudData } from '@/lib/browser-game';
+import { getGoogleIdToken, loadGoogleScores, saveGoogleScores, signInWithGoogle, signOutGoogle, watchGoogleAccount, type GoogleAccount } from '@/lib/firebase-profile';
 
 const icons = [Dice1, Dice2, Dice3, Dice4, Dice5, Dice6, Layers, Layers, House, TrendingUp, ArrowUpRight, Star, Dices];
 const yahtzeeCategory = categories.find(category => category.id === 'yahtzee')!;
@@ -59,11 +59,8 @@ function Empty({ kind, title, body, action }: { kind: 'history' | 'trophy'; titl
   return <div className="empty-card"><Icon size={35} strokeWidth={1.4} /><h2>{title}</h2><p>{body}</p>{action}</div>;
 }
 
-type UndoAction =
-  | { id: number; kind: 'score'; category: string; value: number | null; bonus: number; gameId: string }
-  | { id: number; kind: 'bonus'; bonus: number; gameId: string };
-type OptimisticMutation = { id: number; body: Record<string, unknown>; gameId: string; apply: (state: State) => State; undoId?: number; restoreUndo?: UndoAction };
-type DeleteTarget = { kind: 'game' | 'room'; id: string; name: string };
+type OptimisticMutation = { id: number; body: Record<string, unknown>; gameId: string; apply: (state: State) => State };
+type View = 'home' | 'game';
 
 export default function Home() {
   const pagesBuild = typeof window !== 'undefined' && window.__YAHTZEE_PAGES__ === true;
@@ -72,26 +69,22 @@ export default function Home() {
   const [error, setError] = useState('');
   const [accountError, setAccountError] = useState('');
   const [ready, setReady] = useState(false);
-  const [tab, setTab] = useState('sheet');
+  const [view, setView] = useState<View>('home');
+  const [homeTab, setHomeTab] = useState<'home' | 'leaderboard' | 'history'>('home');
   const [category, setCategory] = useState<Category | null>(null);
   const [numeric, setNumeric] = useState('');
   const [openOnly, setOpenOnly] = useState(false);
-  const [tableOpen, setTableOpen] = useState(false);
-  const [modal, setModal] = useState<'family' | 'profile' | 'manage' | 'new' | 'finish' | null>(null);
+  const [modal, setModal] = useState<'invite' | 'profile' | 'new' | 'finish' | null>(null);
   const [profileName, setProfileName] = useState('');
-  const [tableName, setTableName] = useState('Family game night');
   const [joinCode, setJoinCode] = useState('');
-  const [managedRoomId, setManagedRoomId] = useState('');
-  const [managedRoomName, setManagedRoomName] = useState('');
-  const [pendingRemoval, setPendingRemoval] = useState<string | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [bonusPlanIndex, setBonusPlanIndex] = useState(-1);
   const [celebrating, setCelebrating] = useState(false);
   const [phase, setPhase] = useState(0);
-  const [undoStack, setUndoStack] = useState<UndoAction[]>([]);
   const [savingCount, setSavingCount] = useState(0);
   const [googleUser, setGoogleUser] = useState<GoogleAccount | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
+  const [cloudSaving, setCloudSaving] = useState(false);
   const token = useRef('');
   const googleUserRef = useRef<GoogleAccount | null>(null);
   const snapshot = useRef<State | null>(null);
@@ -100,8 +93,8 @@ export default function Home() {
   const mutationQueue = useRef<Promise<void>>(Promise.resolve());
   const pendingMutations = useRef<OptimisticMutation[]>([]);
   const mutationId = useRef(0);
-  const undoId = useRef(0);
-  const undoStackRef = useRef<UndoAction[]>([]);
+  const cloudQueue = useRef<Promise<void>>(Promise.resolve());
+  const initialViewChosen = useRef(false);
   const celebrateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const me = state?.me;
@@ -111,7 +104,6 @@ export default function Home() {
   const host = state?.room.host_id === me?.id;
   const browserMode = state?.mode === 'browser' || pagesBuild;
   const lanMode = state?.mode === 'lan';
-  const mode = lanMode || browserMode;
   const plans = useMemo(() => bonusPlans(sheet?.scores || {}, 3), [sheet?.scores]);
   const activePlan = bonusPlanIndex >= 0 && plans.length ? plans[bonusPlanIndex % plans.length] : null;
   const bonusNeeded = Math.max(0, 63 - score.upper);
@@ -119,7 +111,6 @@ export default function Home() {
     if (sheet?.scores[item.id] !== null && sheet?.scores[item.id] !== undefined) return sum;
     return sum + ('face' in item ? item.face * 5 : 0);
   }, 0);
-  const managedRoom = state?.managedRooms.find(room => room.id === managedRoomId) || state?.managedRooms[0];
   const headerName = firstName(googleUser?.displayName || me?.name || 'You');
   const profilePhoto = googleUser?.photoURL || me?.photo_url || null;
 
@@ -129,6 +120,23 @@ export default function Home() {
     if (celebrateTimer.current) clearTimeout(celebrateTimer.current);
     celebrateTimer.current = setTimeout(() => setCelebrating(false), 2700);
     if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate([50, 50, 80]);
+  }, []);
+
+  const queueGoogleSave = useCallback((user = googleUserRef.current) => {
+    if (!user || typeof window === 'undefined' || !window.__YAHTZEE_PAGES__) return;
+    const cloudState = exportBrowserCloudData();
+    setCloudSaving(true);
+    const save = async () => {
+      try {
+        await saveGoogleScores(user.uid, cloudState);
+        setAccountError('');
+      } catch (caught) {
+        setAccountError(caught instanceof Error ? `Google score sync: ${caught.message}` : 'Google score sync is unavailable.');
+      } finally {
+        setCloudSaving(false);
+      }
+    };
+    cloudQueue.current = cloudQueue.current.then(save, save);
   }, []);
 
   const requestState = useCallback(async (data: Record<string, unknown>, playerToken = token.current): Promise<State> => {
@@ -179,7 +187,10 @@ export default function Home() {
       try {
         const playerToken = token.current;
         const next = await requestState(data, playerToken);
-        if (playerToken === token.current) applyServerState(next);
+        if (playerToken === token.current) {
+          applyServerState(next);
+          if (!['bootstrap', 'refresh'].includes(String(data.action || ''))) queueGoogleSave();
+        }
         return next;
       } catch (caught) {
         const failure = caught as Error & { status?: number };
@@ -197,15 +208,10 @@ export default function Home() {
     const queued = apiQueue.current.then(run, run);
     apiQueue.current = queued;
     return queued;
-  }, [applyServerState, requestState]);
+  }, [applyServerState, queueGoogleSave, requestState]);
 
   const refreshRef = useRef<() => Promise<unknown>>(async () => {});
   refreshRef.current = () => api({ action: 'refresh' }, true);
-
-  function replaceUndoStack(next: UndoAction[]) {
-    undoStackRef.current = next;
-    setUndoStack(next);
-  }
 
   async function persistMutation(mutation: OptimisticMutation) {
     try {
@@ -218,11 +224,10 @@ export default function Home() {
       pendingMutations.current = pendingMutations.current.filter(item => item.id !== mutation.id);
       setSavingCount(pendingMutations.current.length);
       applyServerState(next);
+      queueGoogleSave();
     } catch (caught) {
       pendingMutations.current = pendingMutations.current.filter(item => item.id !== mutation.id);
       setSavingCount(pendingMutations.current.length);
-      if (mutation.undoId) replaceUndoStack(undoStackRef.current.filter(item => item.id !== mutation.undoId));
-      if (mutation.restoreUndo) replaceUndoStack([...undoStackRef.current, mutation.restoreUndo]);
       if (snapshot.current) applyServerState(snapshot.current);
       const failure = caught as Error & { status?: number };
       setError(failure.name !== 'AbortError' ? failure.message : 'Connection lost. That score was not saved.');
@@ -263,7 +268,7 @@ export default function Home() {
       return;
     }
     const tableCode = new URLSearchParams(window.location.search).get('table');
-    if (tableCode) { setJoinCode(tableCode); setModal('family'); }
+    if (tableCode) { setJoinCode(tableCode); setModal('invite'); }
     void api({ action: 'bootstrap' });
     const timer = setInterval(() => { if (document.visibilityState === 'visible') void api({ action: 'refresh' }, true); }, 4000);
     const reconnect = () => void api({ action: 'bootstrap' }, true);
@@ -287,8 +292,14 @@ export default function Home() {
       try {
         setAuthBusy(true);
         await getGoogleIdToken(user);
+        if (pagesBuild) {
+          const cloudState = await loadGoogleScores(user.uid);
+          const merged = mergeBrowserCloudData(cloudState, { name: user.displayName, photoUrl: user.photoURL });
+          applyServerState(merged);
+        }
         const next = await api({ action: 'bootstrap' });
         if (next) await api({ action: 'sync-profile', name: user.displayName || 'Player', photoUrl: user.photoURL });
+        queueGoogleSave(user);
         setAccountError('');
       } catch (caught) {
         setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not finish.');
@@ -297,7 +308,7 @@ export default function Home() {
       }
     }).then(stop => { unsubscribe = stop; }).catch(caught => setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not load.'));
     return () => { stopped = true; unsubscribe?.(); };
-  }, [api, lanMode]);
+  }, [api, applyServerState, lanMode, pagesBuild, queueGoogleSave]);
 
   useEffect(() => {
     if (modal !== 'finish') return;
@@ -311,8 +322,6 @@ export default function Home() {
 
   useEffect(() => {
     if (game?.id) {
-      undoStackRef.current = [];
-      setUndoStack([]);
       setCategory(null);
       setOpenOnly(false);
       setBonusPlanIndex(-1);
@@ -320,13 +329,19 @@ export default function Home() {
   }, [game?.id]);
   useEffect(() => { setBonusPlanIndex(-1); }, [sheet?.revision]);
 
-  function saveScore(chosen: Category, value: number | null, undoing = false, restoreBonus?: number, restoreUndo?: UndoAction) {
+  useEffect(() => {
+    if (initialViewChosen.current || !ready || !game || !sheet) return;
+    initialViewChosen.current = true;
+    if (!game.ended_at && totals(sheet.scores, sheet.bonus).filled > 0 && !sheet.completed_at) setView('game');
+  }, [game, ready, sheet]);
+
+  function saveScore(chosen: Category, value: number | null) {
     if (!game || !sheet || !state) return;
-    if (chosen.id === 'yahtzee' && value === 50 && sheet.scores.yahtzee === 50 && !undoing) {
+    if (chosen.id === 'yahtzee' && value === 50 && sheet.scores.yahtzee === 50) {
       setCategory(null); setNumeric(''); changeBonus(sheet.bonus + 1); return;
     }
-    const oldValue = sheet.scores[chosen.id] ?? null, oldBonus = sheet.bonus, before = score.filled;
-    const nextBonus = chosen.id === 'yahtzee' ? (value === 50 ? (restoreBonus ?? sheet.bonus) : 0) : sheet.bonus;
+    const oldValue = sheet.scores[chosen.id] ?? null, before = score.filled;
+    const nextBonus = chosen.id === 'yahtzee' ? (value === 50 ? sheet.bonus : 0) : sheet.bonus;
     const apply = (current: State) => {
       const updateGame = (item: Game): Game => item.id !== game.id ? item : {
         ...item,
@@ -334,20 +349,15 @@ export default function Home() {
       };
       return { ...current, game: updateGame(current.game), history: current.history.map(updateGame) };
     };
-    let actionId: number | undefined;
-    if (!undoing) {
-      actionId = ++undoId.current;
-      replaceUndoStack([...undoStackRef.current, { id: actionId, kind: 'score', category: chosen.id, value: oldValue, bonus: oldBonus, gameId: game.id }]);
-    }
     setCategory(null);
     setNumeric('');
-    enqueueMutation({ body: { action: 'score', category: chosen.id, value, ...(restoreBonus !== undefined ? { restoreBonus } : {}) }, gameId: game.id, apply, undoId: actionId, restoreUndo });
+    enqueueMutation({ body: { action: 'score', category: chosen.id, value }, gameId: game.id, apply });
     const afterScores = { ...sheet.scores, [chosen.id]: value };
-    if (before < 13 && totals(afterScores, nextBonus).filled === 13) setModal('finish');
+    if (before < 13 && totals(afterScores, nextBonus).filled === 13) { setView('home'); setHomeTab('home'); setModal('finish'); }
     else if (chosen.id === 'yahtzee' && value === 50 && oldValue !== 50) celebrate();
   }
 
-  function changeBonus(nextBonus: number, undoing = false, restoreUndo?: UndoAction) {
+  function changeBonus(nextBonus: number) {
     if (!sheet || !game || !state || nextBonus < 0 || nextBonus > 12) return;
     const oldBonus = sheet.bonus;
     const apply = (current: State) => {
@@ -357,43 +367,42 @@ export default function Home() {
       };
       return { ...current, game: updateGame(current.game), history: current.history.map(updateGame) };
     };
-    let actionId: number | undefined;
-    if (!undoing) {
-      actionId = ++undoId.current;
-      replaceUndoStack([...undoStackRef.current, { id: actionId, kind: 'bonus', bonus: oldBonus, gameId: game.id }]);
-    }
-    enqueueMutation({ body: { action: 'bonus', bonus: nextBonus }, gameId: game.id, apply, undoId: actionId, restoreUndo });
+    enqueueMutation({ body: { action: 'bonus', bonus: nextBonus }, gameId: game.id, apply });
     if (nextBonus > oldBonus) { celebrate(); toast.success('+100 Yahtzee bonus'); }
-  }
-
-  function undo() {
-    const action = undoStackRef.current.at(-1);
-    if (!action || !sheet || action.gameId !== game?.id) return;
-    replaceUndoStack(undoStackRef.current.slice(0, -1));
-    if (action.kind === 'bonus') { changeBonus(action.bonus, true, action); return; }
-    const chosen = categories.find(item => item.id === action.category)!;
-    saveScore(chosen, action.value, true, action.bonus, action);
   }
 
   async function beginNewGame() {
     if (!game || !host) return;
     const next = await api({ action: 'new-game', gameId: game.id, confirm: true });
-    if (next) { setModal(null); setTab('sheet'); toast.success('New game started.'); }
+    if (next) { setModal(null); setView('game'); toast.success('New game started.'); }
   }
 
   function requestNewGame() {
     if (!game || !host || busy || savingCount) return;
-    if (game.ended_at) void beginNewGame(); else setModal('new');
+    if (game.ended_at || score.remaining === 0) void beginNewGame();
+    else if (score.filled === 0) setView('game');
+    else setModal('new');
+  }
+
+  function openCurrentGame() {
+    if (!game || !sheet) return;
+    if (game.ended_at || score.remaining === 0) { if (host) void beginNewGame(); return; }
+    setView('game');
   }
 
   async function shareTable() {
     if (!state) return;
-    const url = `${window.location.origin}/?table=${state.room.code}`;
+    const invite = new URL(window.location.href);
+    invite.search = '';
+    invite.hash = '';
+    if (!browserMode) invite.searchParams.set('table', state.room.code);
+    const url = invite.toString();
     try {
-      if (navigator.share) await navigator.share({ title: 'Join my Yahtzee table', text: `Join my Yahtzee table with code ${state.room.code}.`, url });
-      else { await navigator.clipboard.writeText(url); toast.success('Table link copied'); }
+      const text = browserMode ? 'Open the Yahtzee scorekeeper and play with me.' : `Join my Yahtzee game with code ${state.room.code}.`;
+      if (navigator.share) await navigator.share({ title: 'Play Yahtzee with me', text, url });
+      else { await navigator.clipboard.writeText(url); toast.success('Invite link copied'); }
     } catch (caught) {
-      if (!(caught instanceof DOMException) || caught.name !== 'AbortError') toast.error('The table link could not be shared.');
+      if (!(caught instanceof DOMException) || caught.name !== 'AbortError') toast.error('The invite link could not be shared.');
     }
   }
 
@@ -430,8 +439,13 @@ export default function Home() {
     try {
       setAuthBusy(true);
       await getGoogleIdToken(user, true);
+      if (pagesBuild) {
+        const cloudState = await loadGoogleScores(user.uid);
+        applyServerState(mergeBrowserCloudData(cloudState, { name: user.displayName, photoUrl: user.photoURL }));
+      }
       const next = await api({ action: 'bootstrap' });
       if (next) await api({ action: 'sync-profile', name: user.displayName || 'Player', photoUrl: user.photoURL });
+      queueGoogleSave(user);
       setAccountError('');
     } catch (caught) {
       setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not finish.');
@@ -440,44 +454,27 @@ export default function Home() {
     }
   }
 
-  function openRoomManagement() {
-    const room = state?.managedRooms[0];
-    if (room) { setManagedRoomId(room.id); setManagedRoomName(room.name); }
-    setPendingRemoval(null);
-    setModal('manage');
-  }
-
-  function chooseManagedRoom(roomId: string) {
-    const room = state?.managedRooms.find(item => item.id === roomId);
-    if (!room) return;
-    setManagedRoomId(room.id);
-    setManagedRoomName(room.name);
-    setPendingRemoval(null);
-  }
-
   async function confirmDeletion() {
     const target = deleteTarget;
     if (!target) return;
-    const next = await api(target.kind === 'game' ? { action: 'delete-game', gameId: target.id } : { action: 'delete-room', roomId: target.id });
+    const next = await api({ action: 'delete-game', gameId: target.id });
     if (!next) return;
-    if (target.kind === 'game') {
-      toast.success('Game deleted');
-    } else {
-      const firstOwned = next.managedRooms[0];
-      if (firstOwned) { setManagedRoomId(firstOwned.id); setManagedRoomName(firstOwned.name); }
-      toast.success('Table deleted');
-    }
+    toast.success('Game deleted');
   }
 
   const live = game ? [...game.sheets].sort((a, b) => totals(b.scores, b.bonus).total - totals(a.scores, a.bonus).total) : [];
-  const played = state?.history.filter(item => item.ended_at) || [];
-  const leaders = leaderboard(state?.history || []);
+  const visibleHistory = state?.history.filter(gameHasMoves) || [];
+  const played = visibleHistory.filter(item => item.ended_at);
+  const leaders = leaderboard(visibleHistory);
   const best = played.length ? Math.max(...played.flatMap(item => item.sheets.map(playerSheet => totals(playerSheet.scores, playerSheet.bonus).total))) : 0;
-  const groups = (state?.history || []).filter(item => item.id !== game?.id || item.ended_at).reduce<Record<string, Game[]>>((acc, item) => {
+  const groups = visibleHistory.filter(item => item.id !== game?.id || item.ended_at).reduce<Record<string, Game[]>>((acc, item) => {
     const key = fmtDate(item.started_at);
     (acc[key] ??= []).push(item);
     return acc;
   }, {});
+  const activePlayers = state?.players.filter(player => player.active) || [];
+  const gameInProgress = !!game && !!sheet && !game.ended_at && score.filled > 0 && score.remaining > 0;
+  const waitingForPlayers = !!sheet?.completed_at && !game?.ended_at;
 
   function row(chosen: Category, index: number) {
     const value = sheet?.scores[chosen.id], filled = value !== null && value !== undefined, Icon = icons[index];
@@ -494,26 +491,16 @@ export default function Home() {
   return <div className="app">
     <Toaster position="top-center" richColors />
     <header className="topbar">
-      <div className="brand"><span className="brand-icon"><Dice5 size={28} strokeWidth={1.7} /></span><span>Yahtzee</span></div>
+      <button className="brand brand-button" onClick={() => { setView('home'); setHomeTab('home'); }} aria-label="Go to Yahtzee home"><span className="brand-icon"><Dice5 size={28} strokeWidth={1.7} /></span><span>Yahtzee</span></button>
       <div className="header-right"><button className="profile-btn" onClick={() => { setProfileName(me?.name === 'You' ? '' : me?.name || ''); setModal('profile'); }}><Avatar name={googleUser?.displayName || me?.name || 'You'} photoUrl={profilePhoto} /><span>{headerName}</span>{googleUser ? <ChevronDown size={13} /> : <LogIn size={13} />}</button></div>
     </header>
 
     <main className="shell">
-      <Tabs value={tab} onValueChange={setTab} className="app-tabs">
-        <TabsList className="nav-tabs" aria-label="App views">
-          <TabsTrigger value="sheet"><NotebookPen size={17} />Score sheet</TabsTrigger>
-          <TabsTrigger value="leaderboard"><Trophy size={17} />Leaderboard</TabsTrigger>
-          <TabsTrigger value="history"><History size={17} />Game history</TabsTrigger>
-        </TabsList>
-        {error && <div role="alert" className="inline-error sync-banner">{error} <button className="text-btn" onClick={() => void api({ action: 'bootstrap' })}>Reconnect</button></div>}
+      {error && <div role="alert" className="inline-error sync-banner">{error} <button className="text-btn" onClick={() => void api({ action: 'bootstrap' })}>Reconnect</button></div>}
 
-        <TabsContent value="sheet">
-          <div className="compact-head">
-            <span className="game-label">{game ? <>Game <Count value={state?.history.length || 0} format={value => value.toString().padStart(2, '0')} /> · {fmtTime(game.started_at)}</> : 'New game'}</span>
-            <button className="text-btn undo-top" disabled={!undoStack.length} onClick={undo} aria-label={`Undo last score. ${undoStack.length} ${undoStack.length === 1 ? 'change' : 'changes'} available.`}>{savingCount ? <LoaderCircle size={13} className="spinner" /> : <RotateCcw size={13} />}Undo{undoStack.length > 1 && <span className="undo-count"><Count value={undoStack.length} /></span>}</button>
-            <button className="btn small" disabled={!state || !host || busy || !!savingCount} onClick={requestNewGame}><Plus size={15} />New game</button>
-          </div>
-          {state && !sheet && <p className="inline-error" style={{ marginBottom: 16 }}>This game is already finished. The host can start a new game to give you a score sheet.</p>}
+      {view === 'game' ? <>
+          <div className="game-save-state" aria-live="polite">{savingCount ? <><LoaderCircle size={13} className="spinner" />Saving score…</> : googleUser && browserMode ? <><Cloud size={13} />{cloudSaving ? 'Syncing with Google…' : 'Saved to Google'}</> : <><Check size={13} />Saved as you play</>}</div>
+          {state && !sheet && <p className="inline-error" style={{ marginBottom: 16 }}>This game is finished. Tap the Yahtzee logo to return home.</p>}
           <div className="game-grid">
             <section className="sheet">
               <div className="sheet-head"><h2>{me?.name && me.name !== 'You' ? `${firstName(me.name)}’s` : 'Your'} score sheet</h2><button className={`pill filter ${openOnly ? '' : 'neutral'}`} aria-pressed={openOnly} onClick={() => setOpenOnly(!openOnly)}>{openOnly ? <Check size={12} /> : null}<Count value={score.remaining} /> left {openOnly ? '· show all' : <ChevronDown size={12} />}</button></div>
@@ -531,8 +518,8 @@ export default function Home() {
                 <div className="score-section">
                   <div className="section-label">Lower section <span>07—13</span></div>
                   {categories.slice(6).filter(item => item.id !== 'yahtzee').map(item => row(item, categories.indexOf(item)))}
-                  <button className="celebrate-btn yahtzee-score-btn" disabled={!sheet || sheet.scores.yahtzee === 50 && sheet.bonus >= 12} onClick={pressYahtzee} aria-label={sheet?.scores.yahtzee === 50 ? `Add 100 point Yahtzee bonus. ${(sheet.bonus || 0) * 100} bonus points logged.` : sheet?.scores.yahtzee === 0 ? 'Yahtzee, 0 points. Edit score.' : 'Yahtzee, not scored. Choose 0 or 50.'}><Sparkles size={19} /><span className="yahtzee-button-label">YAHTZEE!</span>{sheet?.scores.yahtzee === null || sheet?.scores.yahtzee === undefined ? <Sparkles size={19} /> : <span className="yahtzee-score-value"><Count value={sheet.scores.yahtzee} /></span>}</button>
-                  <div className="yahtzee-bonus"><span className="inline" style={{ gap: 4 }}><Sparkles size={13} />Yahtzee bonus</span><strong><Count value={(sheet?.bonus || 0) * 100} /></strong></div>
+                  {!(openOnly && sheet?.scores.yahtzee === 0) && <button className="celebrate-btn yahtzee-score-btn" disabled={!sheet || sheet.scores.yahtzee === 50 && sheet.bonus >= 12} onClick={pressYahtzee} aria-label={sheet?.scores.yahtzee === 50 ? `Add 100 point Yahtzee bonus. ${(sheet.bonus || 0) * 100} bonus points logged.` : sheet?.scores.yahtzee === 0 ? 'Yahtzee, 0 points. Edit score.' : 'Yahtzee, not scored. Choose 0 or 50.'}><Sparkles size={19} /><span className="yahtzee-button-label">YAHTZEE!</span>{sheet?.scores.yahtzee === null || sheet?.scores.yahtzee === undefined ? <Sparkles size={19} /> : <span className="yahtzee-score-value"><Count value={sheet.scores.yahtzee} /></span>}</button>}
+                  {sheet?.scores.yahtzee !== 0 && <div className="yahtzee-bonus"><span className="inline" style={{ gap: 4 }}><Sparkles size={13} />Yahtzee bonus</span><strong><Count value={(sheet?.bonus || 0) * 100} /></strong></div>}
                   <div className="subtotal"><span>Lower total</span><strong><Count value={score.lower} /></strong></div>
                 </div>
               </div>
@@ -540,30 +527,44 @@ export default function Home() {
 
             <aside className="side">
               <section className={`total-card ${score.remaining === 0 ? 'complete' : ''}`}><div className="eyebrow">Final score</div><div className="total-number"><Count value={score.total} /><span>pts</span></div><div className="total-breakdown"><div><span>Upper</span><strong><Count value={score.upper} /></strong></div><div><span>Bonus</span><strong>{score.upperBonus ? <>+<Count value={35} /></> : '—'}</strong></div><div><span>Lower</span><strong><Count value={score.lower} /></strong></div></div><Progress className="game-progress" aria-label="Categories completed" value={score.filled / 13 * 100} /></section>
-              <section className={`table-card ${tableOpen ? 'open' : ''}`}>
-                <button className="card-heading table-toggle" aria-expanded={tableOpen} onClick={() => setTableOpen(!tableOpen)}><h2>{state?.room.name || 'My table'}</h2><span className="pill neutral"><Count value={live.length || 1} /> {live.length === 1 ? 'player' : 'players'} <ChevronDown size={13} /></span></button>
-                <div className="table-body">
-                  {live.map((playerSheet, index) => <div className="player-row" key={playerSheet.player_id}><span className="player-rank">{index + 1}</span><Avatar name={playerSheet.name} photoUrl={playerSheet.photo_url} /><span className="player-name">{playerSheet.name}{playerSheet.player_id === me?.id && playerSheet.name !== 'You' ? ' (you)' : ''}<small>{playerSheet.completed_at ? 'Finished' : <><Count value={totals(playerSheet.scores, playerSheet.bonus).remaining} /> left</>}</small></span><span className="player-score"><Count value={totals(playerSheet.scores, playerSheet.bonus).total} /></span></div>)}
-                  <div className="listening"><span />Listening · <Count value={state?.players.filter(player => player.active).length || 1} /> here</div>
-                  <button className="btn" onClick={() => setModal('family')} disabled={!state}>{browserMode ? <><Layers size={15} />Tables</> : <><Plus size={15} />Invite player</>}</button>
-                  {score.filled === 13 && <button className="btn primary" onClick={() => setModal('finish')}><Trophy size={15} />Final score</button>}
-                </div>
-              </section>
             </aside>
+          </div>
+        </> : <Tabs value={homeTab} onValueChange={value => setHomeTab(value as typeof homeTab)} className="app-tabs home-tabs">
+        <TabsList className="nav-tabs" aria-label="Home views">
+          <TabsTrigger value="home"><HomeIcon size={17} />Home</TabsTrigger>
+          <TabsTrigger value="leaderboard"><Trophy size={17} />Leaderboard</TabsTrigger>
+          <TabsTrigger value="history"><History size={17} />Game history</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="home">
+          <div className="home-heading"><div><p className="eyebrow">{gameInProgress ? 'Game in progress' : waitingForPlayers ? 'Score complete' : 'Ready when you are'}</p><h1>{gameInProgress ? 'Pick up where you left off.' : waitingForPlayers ? 'Waiting for the final scores.' : 'Let’s play Yahtzee.'}</h1></div><button className="btn invite-top" onClick={() => setModal('invite')} disabled={!state}><UserPlus size={16} />Invite player</button></div>
+          <div className="home-grid">
+            <section className="start-card">
+              <div className="start-mark"><Dices size={34} /></div>
+              <div><h2>{gameInProgress ? `${score.remaining} categories left` : waitingForPlayers ? `You finished with ${score.total}` : game?.ended_at ? `Last score: ${score.total}` : 'A fresh score sheet is ready'}</h2><p>{gameInProgress ? 'Your score is saved. Jump back in whenever you’re ready.' : waitingForPlayers ? 'Everyone returns here after finishing. The result will settle when the other players are done.' : 'Start when the dice are on the table. Blank sheets never appear in game history.'}</p></div>
+              <div className="start-actions"><button className="btn primary start-game" disabled={!state || !sheet || waitingForPlayers && !host || busy || !!savingCount} onClick={openCurrentGame}><Play size={17} />{gameInProgress ? 'Continue game' : game?.ended_at || score.remaining === 0 ? 'Play another game' : 'Start game'}</button>{gameInProgress && host && <button className="text-btn start-over" onClick={requestNewGame}>Start a new game</button>}</div>
+            </section>
+
+            <section className="players-card">
+              <div className="card-heading"><div><p className="eyebrow">Players</p><h2>{lanMode ? 'On your Wi-Fi' : 'Ready to play'}</h2></div><span className="pill neutral"><Count value={activePlayers.length || 1} /> active</span></div>
+              <div className="active-player-list">{(state?.players.length ? state.players : me ? [{ ...me, active: true }] : []).map(player => <div className="active-player" key={player.id}><Avatar name={player.name} photoUrl={player.photo_url} /><span><strong>{player.name}{player.id === me?.id && player.name !== 'You' ? ' (you)' : ''}</strong><small>{player.active ? 'Ready now' : 'Away'}</small></span><span className={`presence ${player.active ? 'online' : ''}`} aria-label={player.active ? 'Active' : 'Away'} /></div>)}</div>
+              {!browserMode && <form className="join-inline" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'join-room', code: joinCode }); if (next) { setJoinCode(''); toast.success('You joined the game.'); } }}><label className="field-label" htmlFor="home-join-code">Have an invite code?</label><div className="inline"><input id="home-join-code" className="field" placeholder="ABCD" autoCapitalize="characters" autoCorrect="off" maxLength={8} value={joinCode} onChange={event => setJoinCode(event.target.value.toUpperCase())} /><button className="btn" disabled={busy || ![4, 8].includes(joinCode.replace(/[^a-z0-9]/gi, '').length)}>Join<ArrowRight size={14} /></button></div></form>}
+              {googleUser && browserMode && <div className="cloud-note"><Cloud size={16} /><span><strong>{cloudSaving ? 'Syncing scores…' : 'Scores synced'}</strong><small>Available on devices signed into {googleUser.email || 'this Google account'}.</small></span></div>}
+            </section>
           </div>
         </TabsContent>
 
         <TabsContent value="leaderboard">
-          <div className="intro"><h1>Leaderboard</h1><button className="btn" onClick={() => setModal('family')} disabled={!state}><Users size={16} />Change table</button></div>
+          <div className="intro"><h1>Leaderboard</h1><button className="btn" onClick={() => setHomeTab('home')}><Play size={16} />Play</button></div>
           <div className="leader-stats"><div className="stat-box"><small>Games</small><strong><Count value={played.length} format={value => value.toString().padStart(2, '0')} /></strong></div><div className="stat-box"><small>High score</small><strong>{best ? <Count value={best} /> : '—'}</strong></div><div className="stat-box"><small>Players</small><strong>{leaders.length || live.length ? <Count value={leaders.length || live.length} /> : '—'}</strong></div></div>
-          {leaders.length ? <div className="leader-table"><Table><TableHeader><TableRow><TableHead>#</TableHead><TableHead>Player</TableHead><TableHead>Wins</TableHead><TableHead>Best</TableHead><TableHead>Average</TableHead><TableHead>Games</TableHead></TableRow></TableHeader><TableBody>{leaders.map((player, index) => <TableRow key={player.id}><TableCell>{index === 0 && player.wins ? <Trophy size={18} color="#9a883a" /> : index + 1}</TableCell><TableCell><span className="name-cell"><Avatar name={player.name} photoUrl={player.photo_url} />{player.name}</span></TableCell><TableCell><strong><Count value={player.wins} /></strong></TableCell><TableCell><Count value={player.best} /></TableCell><TableCell><Count value={Math.round(player.sum / player.games)} /></TableCell><TableCell><Count value={player.games} /></TableCell></TableRow>)}</TableBody></Table></div> : <Empty kind="trophy" title="No completed games" body="Finish a game to start the leaderboard." action={<button className="btn primary" onClick={() => setTab('sheet')}>Score sheet<ArrowRight size={15} /></button>} />}
+          {leaders.length ? <div className="leader-table"><Table><TableHeader><TableRow><TableHead>#</TableHead><TableHead>Player</TableHead><TableHead>Wins</TableHead><TableHead>Best</TableHead><TableHead>Average</TableHead><TableHead>Games</TableHead></TableRow></TableHeader><TableBody>{leaders.map((player, index) => <TableRow key={player.id}><TableCell>{index === 0 && player.wins ? <Trophy size={18} color="#9a883a" /> : index + 1}</TableCell><TableCell><span className="name-cell"><Avatar name={player.name} photoUrl={player.photo_url} />{player.name}</span></TableCell><TableCell><strong><Count value={player.wins} /></strong></TableCell><TableCell><Count value={player.best} /></TableCell><TableCell><Count value={Math.round(player.sum / player.games)} /></TableCell><TableCell><Count value={player.games} /></TableCell></TableRow>)}</TableBody></Table></div> : <Empty kind="trophy" title="No completed games" body="Finish a game to start the leaderboard." action={<button className="btn primary" onClick={() => setHomeTab('home')}>Start a game<ArrowRight size={15} /></button>} />}
         </TabsContent>
 
         <TabsContent value="history">
-          <div className="intro"><h1>Game history</h1><button className="btn" onClick={() => setModal('family')} disabled={!state}><Users size={16} />Change table</button></div>
-          <div className="history-layout">{Object.keys(groups).length ? Object.entries(groups).map(([day, games]) => <section key={day}><h2 className="history-date">{day}</h2>{games.map(item => <HistoryCard key={item.id} game={item} canDelete={!!host} onDelete={() => setDeleteTarget({ kind: 'game', id: item.id, name: fmtTime(item.started_at) })} />)}</section>) : <Empty kind="history" title="No games yet" body="Finished games appear here." action={<button className="btn primary" onClick={() => setTab('sheet')}>Score sheet<ArrowRight size={15} /></button>} />}</div>
+          <div className="intro"><h1>Game history</h1><button className="btn" onClick={() => setHomeTab('home')}><Play size={16} />Play</button></div>
+          <div className="history-layout">{Object.keys(groups).length ? Object.entries(groups).map(([day, games]) => <section key={day}><h2 className="history-date">{day}</h2>{games.map(item => <HistoryCard key={item.id} game={item} canDelete={!!host} onDelete={() => setDeleteTarget({ id: item.id, name: fmtTime(item.started_at) })} />)}</section>) : <Empty kind="history" title="No games yet" body="Games appear here after the first score is placed. Blank sheets are never saved." action={<button className="btn primary" onClick={() => setHomeTab('home')}>Start a game<ArrowRight size={15} /></button>} />}</div>
         </TabsContent>
-      </Tabs>
+      </Tabs>}
     </main>
 
     <Dialog open={!!category} onOpenChange={open => { if (!open) { setCategory(null); setNumeric(''); } }}>
@@ -578,7 +579,7 @@ export default function Home() {
               <div className="keypad" aria-label="Score keypad">{['1', '2', '3', '4', '5', '6', '7', '8', '9', 'clear', '0', 'back'].map(key => <button key={key} type="button" className={`keypad-key ${key === 'clear' || key === 'back' ? 'keypad-action' : ''}`} onClick={() => pressKey(key)} aria-label={key === 'clear' ? 'Clear' : key === 'back' ? 'Backspace' : key}>{key === 'clear' ? 'Clear' : key === 'back' ? '⌫' : key}</button>)}</div>
               <div className="actions" style={{ marginTop: 14 }}><button className="btn" type="button" onClick={() => category && saveScore(category, 0)}>Cross out · 0</button><button className="btn primary" disabled={!numeric.trim() || Number(numeric) < 5 || Number(numeric) > 30 || !Number.isInteger(Number(numeric))} type="submit">Save score<Check size={16} /></button></div>
             </form>}
-        {category && sheet?.scores[category.id] != null && <button className="btn clear-category" onClick={() => saveScore(category, null)}><RotateCcw size={15} />Clear category</button>}
+        {category && sheet?.scores[category.id] != null && <button className="btn clear-category" onClick={() => saveScore(category, null)}><X size={15} />Clear category</button>}
       </DialogContent>
     </Dialog>
 
@@ -587,44 +588,31 @@ export default function Home() {
         {modal === 'profile' && <>
           <DialogHeader><DialogTitle>Profile</DialogTitle></DialogHeader>
           {!lanMode && <div className="google-auth">{googleUser ? <><div className="google-account"><Avatar name={googleUser.displayName || googleUser.email || 'G'} photoUrl={googleUser.photoURL} /><span><strong>{googleUser.displayName || 'Google account'}</strong><small>{googleUser.email}</small></span></div><button className="btn" disabled={authBusy} onClick={async () => { try { setAuthBusy(true); await signOutGoogle(); googleUserRef.current = null; setGoogleUser(null); setAccountError(''); } catch (caught) { setAccountError(caught instanceof Error ? caught.message : 'Could not sign out.'); } finally { setAuthBusy(false); } }}><LogOut size={15} />Sign out</button></> : <button className="btn google-btn" disabled={authBusy} onClick={async () => { try { setAuthBusy(true); await signInWithGoogle(); } catch (caught) { setAccountError(caught instanceof Error ? caught.message : 'Google sign-in was canceled.'); } finally { setAuthBusy(false); } }}><span className="google-g">G</span>{authBusy ? 'Opening Google…' : 'Sign in with Google'}</button>}</div>}
-          {browserMode && <p className="install-note">Google sign-in uses your name and photo. Scores and history still stay in this browser.</p>}
+          {browserMode && <p className="install-note">Sign in to keep your local scores and history synced with this Google account on your other devices.</p>}
           {accountError && <div role="alert" className="inline-error account-error">{accountError} {googleUser && <button className="text-btn" disabled={authBusy} onClick={() => void retryGoogleSync()}>Try again</button>}</div>}
           <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'rename', name: profileName }); if (next) setModal(null); }}><label className="field-label" htmlFor="player-name">Player name</label><input id="player-name" className="field" autoFocus maxLength={32} placeholder="David" value={profileName} onChange={event => setProfileName(event.target.value)} required /><button className="btn primary" style={{ width: '100%', marginTop: 15 }} disabled={busy || !profileName.trim()}>Save<Check size={16} /></button></form>
-          {!!state?.managedRooms.length && <button className="btn manage-button" onClick={openRoomManagement}><Settings size={16} />Manage tables</button>}
         </>}
 
-        {modal === 'manage' && <>
-          <DialogHeader><DialogTitle>Manage tables</DialogTitle><DialogDescription>Rename tables you own and remove players who should no longer join future games.</DialogDescription></DialogHeader>
-          {state && state.managedRooms.length > 1 && <div className="room-list"><h3 className="field-label">Owned tables</h3>{state.managedRooms.map(room => <button key={room.id} className={`btn ${managedRoom?.id === room.id ? 'selected-room' : ''}`} onClick={() => chooseManagedRoom(room.id)}>{room.name}{managedRoom?.id === room.id ? <Check size={14} /> : <ArrowRight size={14} />}</button>)}</div>}
-          {managedRoom && <>
-            <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'rename-room', roomId: managedRoom.id, name: managedRoomName }); if (next) { const updated = next.managedRooms.find(room => room.id === managedRoom.id); if (updated) setManagedRoomName(updated.name); toast.success('Table name saved'); } }}><label className="field-label" htmlFor="managed-room-name">Table name</label><div className="inline"><input id="managed-room-name" className="field" maxLength={32} value={managedRoomName} onChange={event => setManagedRoomName(event.target.value)} required /><button className="btn primary" disabled={busy || !managedRoomName.trim()}>Save</button></div></form>
-            <div className="section-divider member-management"><h3 className="field-label">Players</h3>{managedRoom.members.map(member => <div className="managed-member" key={member.id}><Avatar name={member.name} photoUrl={member.photo_url} /><span>{member.name}<small>{member.id === managedRoom.host_id ? 'Owner' : 'Member'}</small></span>{member.id !== managedRoom.host_id && (pendingRemoval === member.id ? <span className="remove-confirm"><button className="text-btn" onClick={() => setPendingRemoval(null)}>Cancel</button><button className="btn danger small" disabled={busy} onClick={async () => { const next = await api({ action: 'remove-member', roomId: managedRoom.id, playerId: member.id }); if (next) { setPendingRemoval(null); toast.success('Player removed'); } }}>Remove</button></span> : <button className="text-btn remove-member" onClick={() => setPendingRemoval(member.id)}><UserMinus size={15} />Remove</button>)}</div>)}</div>
-            <button className="btn delete-table" disabled={busy || !!savingCount} onClick={() => setDeleteTarget({ kind: 'room', id: managedRoom.id, name: managedRoom.name })}><Trash2 size={16} />Delete table</button>
-          </>}
-          <button className="btn" onClick={() => setModal('profile')}>Back to profile</button>
-          {error && <div role="alert" className="inline-error">{error}</div>}
-        </>}
-
-        {modal === 'family' && <>
-          <DialogHeader><DialogTitle>{browserMode ? 'Your browser tables' : 'Your family table'}</DialogTitle><DialogDescription>{browserMode ? 'This GitHub Pages edition saves scores and history only in this browser.' : mode ? 'Everyone opens the address shown on the host computer, then joins with this code.' : 'Share the table. The code will already be filled in when the link opens.'}</DialogDescription></DialogHeader>
+        {modal === 'invite' && <>
+          <DialogHeader><DialogTitle>Invite a player</DialogTitle><DialogDescription>{browserMode ? 'Share the scorekeeper. For live multi-device play, open the local edition on the same Wi-Fi.' : 'Share this link or code. Connected players appear on Home automatically.'}</DialogDescription></DialogHeader>
           {me?.name === 'You' && <button className="btn" onClick={() => { setProfileName(''); setModal('profile'); }}>First, add your name<ArrowRight size={15} /></button>}
-          {state && !browserMode && <><div className="room-code">{state.room.code}</div>{!mode && <button className="btn primary share-table" onClick={() => void shareTable()}><Share2 size={16} />Share table</button>}</>}
-          {!browserMode && <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'join-room', code: joinCode }); if (next) { setModal(null); setJoinCode(''); setTab('sheet'); toast.success('You’re at the table.'); } }}><label className="field-label" htmlFor="join-code">Table code</label><div className="inline"><input id="join-code" className="field" placeholder="ABCD" autoCapitalize="characters" autoCorrect="off" maxLength={8} value={joinCode} onChange={event => setJoinCode(event.target.value.toUpperCase())} /><button className="btn primary" disabled={busy || ![4, 8].includes(joinCode.replace(/[^a-z0-9]/gi, '').length)}>Join<ArrowRight size={14} /></button></div></form>}
+          {state && !browserMode && <div className="room-code">{state.room.code}</div>}
+          <button className="btn primary share-table" onClick={() => void shareTable()}><Share2 size={16} />Share invite</button>
+          {!browserMode && <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'join-room', code: joinCode }); if (next) { setModal(null); setJoinCode(''); toast.success('You joined the game.'); } }}><label className="field-label" htmlFor="join-code">Invite code</label><div className="inline"><input id="join-code" className="field" placeholder="ABCD" autoCapitalize="characters" autoCorrect="off" maxLength={8} value={joinCode} onChange={event => setJoinCode(event.target.value.toUpperCase())} /><button className="btn" disabled={busy || ![4, 8].includes(joinCode.replace(/[^a-z0-9]/gi, '').length)}>Join<ArrowRight size={14} /></button></div></form>}
+          {browserMode && <a className="btn" href="./yahtzee-local.zip" download><Users size={16} />Get Wi-Fi multiplayer</a>}
           {error && <div role="alert" className="inline-error">{error}</div>}
-          <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'create-room', name: tableName }); if (next) { toast.success('Your new table is ready. Share the code above.'); setTab('sheet'); } }}><label className="field-label" htmlFor="table-name">Start a separate table</label><div className="inline"><input className="field" id="table-name" value={tableName} onChange={event => setTableName(event.target.value)} maxLength={32} required /><button className="btn" disabled={busy || !tableName.trim()}>Create</button></div></form>
-          {state && state.rooms.length > 1 && <div className="room-list section-divider"><h3 className="field-label">Your tables</h3>{state.rooms.map(room => <button key={room.id} className="btn" disabled={busy || room.id === state.room.id} onClick={async () => { if (await api({ action: 'switch-room', roomId: room.id })) { setModal(null); setTab('sheet'); } }}>{room.name}{room.id === state.room.id ? <Check size={14} /> : <ArrowRight size={14} />}</button>)}</div>}
         </>}
 
         {modal === 'new' && <><DialogHeader><DialogTitle>Start a new game?</DialogTitle><DialogDescription>This game isn’t finished. Starting over will save it as unfinished.</DialogDescription></DialogHeader><div className="actions"><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy || !host} onClick={() => void beginNewGame()}>Start new game<ArrowRight size={15} /></button></div>{error && <p className="inline-error">{error}</p>}</>}
-        {modal === 'finish' && <><DialogHeader><DialogTitle>Final score</DialogTitle><DialogDescription>{me?.name === 'You' ? 'Your' : `${firstName(me?.name || 'Your')}’s`} final score · {game ? fmtDate(game.started_at) : ''}</DialogDescription></DialogHeader><div><div className="finish-line"><span>Upper section</span><strong><Count value={score.upper} /></strong></div>{phase >= 1 && <div className="finish-line"><span>Upper bonus</span><strong>{score.upperBonus ? <>+<Count value={35} /></> : <Count value={0} />}</strong></div>}{phase >= 2 && <div className="finish-line"><span>Lower section {sheet?.bonus ? '(includes Yahtzee bonus)' : ''}</span><strong><Count value={score.lower} /></strong></div>}</div><div className="finish-score"><p>GRAND TOTAL</p><strong><Count value={phase >= 3 ? score.total : 0} duration={700} /></strong></div><p className="install-note">{browserMode ? 'Saved in this browser’s local game history.' : game?.ended_at ? 'Saved with everyone’s scores in game history.' : 'Your score is saved. The table result will be final when everyone finishes.'}</p><div className="actions"><button className="btn" onClick={() => { setModal(null); setTab('history'); }}>Game history</button>{host ? <button className="btn primary" onClick={requestNewGame}>Play again<ArrowRight size={15} /></button> : <button className="btn primary" onClick={() => setModal(null)}>Back to the table</button>}</div></>}
+        {modal === 'finish' && <><DialogHeader><DialogTitle>Final score</DialogTitle><DialogDescription>{me?.name === 'You' ? 'Your' : `${firstName(me?.name || 'Your')}’s`} game is complete.</DialogDescription></DialogHeader><div><div className="finish-line"><span>Upper section</span><strong><Count value={score.upper} /></strong></div>{phase >= 1 && <div className="finish-line"><span>Upper bonus</span><strong>{score.upperBonus ? <>+<Count value={35} /></> : <Count value={0} />}</strong></div>}{phase >= 2 && <div className="finish-line"><span>Lower section {sheet?.bonus ? '(includes Yahtzee bonus)' : ''}</span><strong><Count value={score.lower} /></strong></div>}</div><div className="finish-score"><p>GRAND TOTAL</p><strong><Count value={phase >= 3 ? score.total : 0} duration={700} /></strong></div><p className="install-note">{googleUser && browserMode ? 'Saved locally and synced with your Google account.' : browserMode ? 'Saved in this browser’s game history.' : game?.ended_at ? 'Saved with everyone’s scores in game history.' : 'Your score is saved. The final result will appear when everyone finishes.'}</p><div className="actions"><button className="btn" onClick={() => { setModal(null); setHomeTab('history'); }}>Game history</button><button className="btn primary" onClick={() => { setModal(null); setHomeTab('home'); }}>Back home<ArrowRight size={15} /></button></div></>}
       </DialogContent>
     </Dialog>
 
     <AlertDialog open={!!deleteTarget} onOpenChange={open => { if (!open) setDeleteTarget(null); }}>
       <AlertDialogContent className="delete-dialog">
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete {deleteTarget?.kind === 'game' ? 'game' : 'table'}?</AlertDialogTitle>
-          <AlertDialogDescription>{deleteTarget?.kind === 'game' ? `Delete the ${deleteTarget.name} game and all of its scores?` : `Delete “${deleteTarget?.name}” and all of its game history? Players will keep their profiles.`}</AlertDialogDescription>
+          <AlertDialogTitle>Delete game?</AlertDialogTitle>
+          <AlertDialogDescription>Delete the {deleteTarget?.name} game and all of its scores?</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction className="delete-action" onClick={() => void confirmDeletion()}>Delete</AlertDialogAction></AlertDialogFooter>
       </AlertDialogContent>
