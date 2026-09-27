@@ -64,7 +64,7 @@ function createStore(): BrowserStore {
     version: 1,
     me: { id: playerId, name: 'You', photo_url: null },
     currentRoom: roomId,
-    rooms: [{ id: roomId, name: 'My table', code: code(), host_id: playerId, created_at: now }],
+    rooms: [{ id: roomId, name: 'My game', code: code(), host_id: playerId, created_at: now }],
     games: [{ id: gameId, room_id: roomId, started_at: now, ended_at: null, sheets: [sheet(gameId, playerId, 'You')] }],
   };
 }
@@ -145,7 +145,7 @@ export function mergeBrowserCloudData(value: unknown, profile?: { name?: string 
 }
 
 function currentRoom(store: BrowserStore) {
-  return store.rooms.find(room => room.id === store.currentRoom) || fail('That table was not found.', 404);
+  return store.rooms.find(room => room.id === store.currentRoom) || fail('That game was not found.', 404);
 }
 
 function roomGames(store: BrowserStore, roomId = store.currentRoom) {
@@ -177,7 +177,7 @@ function snapshot(store: BrowserStore): State {
 
 function createRoom(store: BrowserStore, name: unknown) {
   const roomId = id(), gameId = id(), now = Date.now();
-  store.rooms.push({ id: roomId, name: clean(name, 'My table'), code: code(), host_id: store.me.id, created_at: now });
+  store.rooms.push({ id: roomId, name: clean(name, 'My game'), code: code(), host_id: store.me.id, created_at: now });
   store.games.push({ id: gameId, room_id: roomId, started_at: now, ended_at: null, sheets: [sheet(gameId, store.me.id, store.me.name)] });
   store.currentRoom = roomId;
 }
@@ -199,23 +199,23 @@ export async function browserGameRequest(body: Record<string, unknown>): Promise
   } else if (action === 'create-room') {
     createRoom(store, body.name);
   } else if (action === 'rename-room') {
-    const room = store.rooms.find(item => item.id === String(body.roomId || '')) || fail('That table was not found.', 404);
-    room.name = clean(body.name, 'My table');
+    const room = store.rooms.find(item => item.id === String(body.roomId || '')) || fail('That game was not found.', 404);
+    room.name = clean(body.name, 'My game');
   } else if (action === 'delete-room') {
     const roomId = String(body.roomId || '');
-    if (!store.rooms.some(room => room.id === roomId)) fail('That table was not found.', 404);
+    if (!store.rooms.some(room => room.id === roomId)) fail('That game was not found.', 404);
     store.rooms = store.rooms.filter(room => room.id !== roomId);
     store.games = store.games.filter(game => game.room_id !== roomId);
-    if (!store.rooms.length) createRoom(store, 'My table');
+    if (!store.rooms.length) createRoom(store, 'My game');
     else if (store.currentRoom === roomId) store.currentRoom = [...store.rooms].sort((a, b) => b.created_at - a.created_at)[0].id;
   } else if (action === 'switch-room') {
     const roomId = String(body.roomId || '');
-    if (!store.rooms.some(room => room.id === roomId)) fail('That table was not found.', 404);
+    if (!store.rooms.some(room => room.id === roomId)) fail('That game was not found.', 404);
     store.currentRoom = roomId;
   } else if (action === 'join-room') {
     const wanted = String(body.code || '').replace(/[^a-z0-9]/gi, '').toUpperCase();
     const room = store.rooms.find(item => item.code === wanted);
-    if (!room) fail('Shared tables need a server. This Pages edition keeps scores only in this browser.');
+    if (!room) fail('Live shared games need the Wi-Fi edition. This Pages edition keeps multiplayer scores on one device.');
     store.currentRoom = room.id;
   } else if (action === 'score' || action === 'bonus') {
     const game = roomGames(store).find(item => item.id === String(body.gameId || '')) || fail('This score sheet is not available.', 404);
@@ -253,7 +253,7 @@ export async function browserGameRequest(body: Record<string, unknown>): Promise
     }
   } else if (action === 'new-game') {
     const latest = roomGames(store)[0];
-    if (!latest || latest.id !== String(body.gameId || '')) fail('A new game has already started. Your table is refreshed.', 409);
+    if (!latest || latest.id !== String(body.gameId || '')) fail('A new game has already started. Your game is refreshed.', 409);
     const gameId = id(), now = Date.now();
     store.games.push({ id: gameId, room_id: store.currentRoom, started_at: now, ended_at: null, sheets: [sheet(gameId, store.me.id, store.me.name)] });
   } else if (!['bootstrap', 'refresh'].includes(action)) {
