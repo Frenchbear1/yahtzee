@@ -71,3 +71,43 @@
 .delete-dialog{border-radius:18px!important;background:#fff!important;color:#182329}
 .delete-action{background:#9d4437!important;color:#fff!important}
 @media(max-width:760px){.history-delete{top:9px;right:9px}.history-card summary>.inline{margin-right:25px}}
+
+/* Home-first game flow */
+.brand-button{border:0;background:transparent;padding:0;color:inherit;text-align:left}
+.brand-button:hover .brand-icon{transform:rotate(0deg)}
+.brand-icon{transition:transform .18s ease}
+.game-save-state{min-height:28px;margin:5px 2px 12px;display:flex;align-items:center;justify-content:flex-end;gap:6px;color:#718078;font-size:12px}
+.home-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin:34px 0 22px}
+.home-heading h1{font-size:clamp(32px,4.8vw,54px);max-width:780px;letter-spacing:-2px}
+.invite-top{flex-shrink:0}
+.home-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(300px,.85fr);gap:20px;align-items:stretch}
+.start-card{position:relative;isolation:isolate;min-height:390px;overflow:hidden;border-radius:24px;padding:clamp(26px,4vw,48px);background:#1d4438;color:#f7fbf8;display:flex;flex-direction:column;justify-content:space-between;gap:34px;box-shadow:0 18px 45px #173c2e1c}
+.start-card::after{content:"";position:absolute;z-index:-1;width:320px;height:320px;border-radius:50%;right:-105px;top:-110px;background:#dceda81f;border:55px solid #dceda80e}
+.start-mark{width:68px;height:68px;border-radius:20px;background:#dceda8;color:#234638;display:grid;place-items:center;transform:rotate(-6deg)}
+.start-card h2{font-size:clamp(28px,4vw,44px);line-height:1.02;letter-spacing:-1.6px;max-width:620px}
+.start-card p{margin-top:13px;color:#c5d7ce;line-height:1.65;max-width:580px;font-size:15px}
+.start-actions{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+.start-game.btn.primary{background:#dceda8;border-color:#dceda8;color:#234638;min-height:50px;padding-inline:21px;font-size:15px}
+.start-game.btn.primary:hover{background:#e7f5bd}
+.start-over{color:#dce8e2}
+.players-card{border:1px solid var(--border);background:#fff;border-radius:24px;padding:25px;display:flex;flex-direction:column;min-width:0}
+.players-card .card-heading{margin-bottom:10px}
+.players-card .card-heading h2{font-size:21px;letter-spacing:-.5px}
+.active-player-list{display:grid;gap:2px}
+.active-player{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:11px;padding:12px 1px;border-bottom:1px solid #eef2ef}
+.active-player>span:nth-child(2){display:grid;min-width:0}
+.active-player strong{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.active-player small{color:#87928c;font-size:12px;margin-top:3px}
+.presence{width:9px;height:9px;border-radius:50%;background:#c7cfca;box-shadow:0 0 0 4px #f0f2f1}
+.presence.online{background:#4c966b;box-shadow:0 0 0 4px #e3f0e7}
+.join-inline{border-top:1px solid var(--border);padding-top:18px;margin-top:auto}
+.cloud-note{display:flex;align-items:flex-start;gap:10px;background:#f0f6ef;color:#42614c;border-radius:13px;padding:13px;margin-top:auto}
+.cloud-note>span{display:grid;min-width:0}
+.cloud-note strong{font-size:13px}
+.cloud-note small{font-size:11px;line-height:1.45;color:#738078;margin-top:3px;overflow-wrap:anywhere}
+.share-table{width:100%}
+.home-tabs>[data-slot="tabs-content"]{margin-top:0}
+
+@media(max-width:900px){.home-grid{grid-template-columns:1fr}.start-card{min-height:330px}.players-card{min-height:280px}}
+@media(max-width:760px){.home-heading{align-items:center;margin:26px 2px 18px}.home-heading h1{font-size:32px;letter-spacing:-1.1px}.home-heading .eyebrow{font-size:10px}.invite-top{font-size:12px;padding:9px 10px}.start-card{min-height:315px;border-radius:19px;padding:25px}.start-mark{width:56px;height:56px;border-radius:16px}.start-card h2{font-size:29px}.start-card p{font-size:13px}.players-card{border-radius:19px;padding:20px}.game-save-state{margin-top:-5px}.home-tabs .nav-tabs{gap:12px!important}.home-tabs .nav-tabs button{font-size:12px}.home-tabs .nav-tabs button svg{width:15px}.home-grid{gap:13px}}
+@media(max-width:420px){.home-heading{align-items:flex-end}.invite-top{font-size:0;min-width:44px;padding:9px}.invite-top svg{width:18px;height:18px}.start-actions{align-items:flex-start;flex-direction:column;gap:7px}.start-game{width:100%}.start-over{align-self:center}.home-tabs .nav-tabs button{gap:4px}}

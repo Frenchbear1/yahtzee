@@ -26,6 +26,12 @@ service cloud.firestore {
         && validProfile()
         && request.resource.data.playerToken == resource.data.playerToken;
       allow delete: if isOwner();
+
+      // A signed-in player's score history is private to that Google account.
+      // The app stores it below the profile so it can be restored on any device.
+      match /yahtzee/{document=**} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
     }
   }
 }

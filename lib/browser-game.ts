@@ -1,4 +1,4 @@
-import { totals, validScore, type Game, type Room, type Scores, type Sheet, type State } from './game';
+import { gameHasMoves, totals, validScore, type Game, type Room, type Scores, type Sheet, type State } from './game';
 
 type BrowserRoom = Room & { created_at: number };
 type BrowserStore = {
@@ -6,6 +6,11 @@ type BrowserStore = {
   me: State['me'];
   currentRoom: string;
   rooms: BrowserRoom[];
+  games: Game[];
+};
+
+export type BrowserCloudData = {
+  version: 1;
   games: Game[];
 };
 
@@ -76,6 +81,67 @@ function loadStore() {
 
 function saveStore(store: BrowserStore) {
   localStorage.setItem(storageKey, JSON.stringify(store));
+}
+
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function validCloudGame(value: unknown): value is Game {
+  if (!value || typeof value !== 'object') return false;
+  const game = value as Partial<Game>;
+  return typeof game.id === 'string' && typeof game.started_at === 'number' && Array.isArray(game.sheets)
+    && game.sheets.every(playerSheet => playerSheet && typeof playerSheet === 'object' && typeof playerSheet.game_id === 'string'
+      && typeof playerSheet.player_id === 'string' && typeof playerSheet.name === 'string' && typeof playerSheet.scores === 'object');
+}
+
+function preferredGame(first: Game, second: Game) {
+  const firstRevision = Math.max(0, ...first.sheets.map(playerSheet => Number(playerSheet.revision) || 0));
+  const secondRevision = Math.max(0, ...second.sheets.map(playerSheet => Number(playerSheet.revision) || 0));
+  if (secondRevision !== firstRevision) return secondRevision > firstRevision ? second : first;
+  const firstFilled = Math.max(0, ...first.sheets.map(playerSheet => totals(playerSheet.scores, playerSheet.bonus).filled));
+  const secondFilled = Math.max(0, ...second.sheets.map(playerSheet => totals(playerSheet.scores, playerSheet.bonus).filled));
+  if (secondFilled !== firstFilled) return secondFilled > firstFilled ? second : first;
+  return (second.ended_at || 0) > (first.ended_at || 0) ? second : first;
+}
+
+export function exportBrowserCloudData(): BrowserCloudData {
+  const store = loadStore();
+  return clone({ version: 1, games: store.games.filter(gameHasMoves) });
+}
+
+export function mergeBrowserCloudData(value: unknown, profile?: { name?: string | null; photoUrl?: string | null }) {
+  const store = loadStore();
+  const data = value as Partial<BrowserCloudData> | null;
+  const remoteGames = data?.version === 1 && Array.isArray(data.games) ? data.games.filter(validCloudGame).filter(gameHasMoves) : [];
+  const byId = new Map(store.games.map(game => [game.id, game]));
+  for (const remote of remoteGames) {
+    const normalized: Game = {
+      ...clone(remote),
+      room_id: store.currentRoom,
+      sheets: remote.sheets.map(playerSheet => ({
+        ...playerSheet,
+        game_id: remote.id,
+        player_id: store.me.id,
+        name: clean(profile?.name, playerSheet.name || store.me.name),
+        photo_url: cleanPhoto(profile?.photoUrl) || cleanPhoto(playerSheet.photo_url),
+      })),
+    };
+    const existing = byId.get(normalized.id);
+    byId.set(normalized.id, existing ? preferredGame(existing, normalized) : normalized);
+  }
+  if (profile) {
+    store.me.name = clean(profile.name, store.me.name || 'You');
+    store.me.photo_url = cleanPhoto(profile.photoUrl);
+  }
+  store.games = [...byId.values()];
+  const localCurrent = roomGames(store)[0];
+  const remoteCurrent = remoteGames.sort((a, b) => b.started_at - a.started_at)[0];
+  if (localCurrent && !gameHasMoves(localCurrent) && remoteCurrent && !remoteCurrent.ended_at) {
+    store.games = store.games.filter(game => game.id !== localCurrent.id);
+  }
+  saveStore(store);
+  return snapshot(store);
 }
 
 function currentRoom(store: BrowserStore) {
