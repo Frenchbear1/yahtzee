@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
   ArrowRight, ArrowUpRight, Check, ChevronDown, Dice1, Dice2, Dice3, Dice4, Dice5, Dice6,
-  Cloud, Dices, Flag, History, Home as HomeIcon, House, Layers, LoaderCircle, LogIn, LogOut,
+  Cloud, Dices, Flag, History, Home as HomeIcon, House, Layers, LogIn, LogOut,
   Play, Plus, Share2, Sparkles, Star, Trash2, TrendingUp, Trophy, UserPlus, Users, X,
 } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -12,7 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Progress } from '@/components/ui/progress';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Toaster, toast } from 'sonner';
-import { bonusPlans, categories, gameHasMoves, leaderboard, totals, type Category, type Game, type State } from '@/lib/game';
+import { bonusPlans, categories, gameHasMoves, leaderboard, totals, type Category, type Game, type Sheet, type State } from '@/lib/game';
 import { browserGameRequest, exportBrowserCloudData, mergeBrowserCloudData } from '@/lib/browser-game';
 import { getGoogleIdToken, loadGoogleScores, saveGoogleScores, signInWithGoogle, signOutGoogle, watchGoogleAccount, type GoogleAccount } from '@/lib/firebase-profile';
 
@@ -499,7 +499,6 @@ export default function Home() {
       {error && <div role="alert" className="inline-error sync-banner">{error} <button className="text-btn" onClick={() => void api({ action: 'bootstrap' })}>Reconnect</button></div>}
 
       {view === 'game' ? <>
-          <div className="game-save-state" aria-live="polite">{savingCount ? <><LoaderCircle size={13} className="spinner" />Saving score…</> : googleUser && browserMode ? <><Cloud size={13} />{cloudSaving ? 'Syncing with Google…' : 'Saved to Google'}</> : <><Check size={13} />Saved as you play</>}</div>
           {state && !sheet && <p className="inline-error" style={{ marginBottom: 16 }}>This game is finished. Tap the Yahtzee logo to return home.</p>}
           <div className="game-grid">
             <section className="sheet">
@@ -537,12 +536,13 @@ export default function Home() {
         </TabsList>
 
         <TabsContent value="home">
-          <div className="home-heading"><div><p className="eyebrow">{gameInProgress ? 'Game in progress' : waitingForPlayers ? 'Score complete' : 'Ready when you are'}</p><h1>{gameInProgress ? 'Pick up where you left off.' : waitingForPlayers ? 'Waiting for the final scores.' : 'Let’s play Yahtzee.'}</h1></div><button className="btn invite-top" onClick={() => setModal('invite')} disabled={!state}><UserPlus size={16} />Invite player</button></div>
+          <div className="home-heading"><div><h1>{gameInProgress ? 'Pick up where you left off.' : waitingForPlayers ? 'Waiting for the final scores.' : 'Let’s play Yahtzee.'}</h1></div><button className="btn invite-top" onClick={() => setModal('invite')} disabled={!state}><UserPlus size={16} />Invite player</button></div>
           <div className="home-grid">
             <section className="start-card">
-              <div className="start-mark"><Dices size={34} /></div>
-              <div><h2>{gameInProgress ? `${score.remaining} categories left` : waitingForPlayers ? `You finished with ${score.total}` : game?.ended_at ? `Last score: ${score.total}` : 'A fresh score sheet is ready'}</h2><p>{gameInProgress ? 'Your score is saved. Jump back in whenever you’re ready.' : waitingForPlayers ? 'Everyone returns here after finishing. The result will settle when the other players are done.' : 'Start when the dice are on the table. Blank sheets never appear in game history.'}</p></div>
-              <div className="start-actions"><button className="btn primary start-game" disabled={!state || !sheet || waitingForPlayers && !host || busy || !!savingCount} onClick={openCurrentGame}><Play size={17} />{gameInProgress ? 'Continue game' : game?.ended_at || score.remaining === 0 ? 'Play another game' : 'Start game'}</button>{gameInProgress && host && <button className="text-btn start-over" onClick={requestNewGame}>Start a new game</button>}</div>
+              <div className="start-row">
+                <div className="start-mark"><Dices size={34} /></div>
+                <div className="start-actions"><button className="btn primary start-game" disabled={!state || !sheet || waitingForPlayers && !host || busy || !!savingCount} onClick={openCurrentGame}><Play size={17} />{gameInProgress ? 'Continue game' : game?.ended_at || score.remaining === 0 ? 'Play another game' : 'Start game'}</button>{gameInProgress && host && <button className="text-btn start-over" onClick={requestNewGame}>Start a new game</button>}</div>
+              </div>
             </section>
 
             <section className="players-card">
@@ -588,7 +588,6 @@ export default function Home() {
         {modal === 'profile' && <>
           <DialogHeader><DialogTitle>Profile</DialogTitle></DialogHeader>
           {!lanMode && <div className="google-auth">{googleUser ? <><div className="google-account"><Avatar name={googleUser.displayName || googleUser.email || 'G'} photoUrl={googleUser.photoURL} /><span><strong>{googleUser.displayName || 'Google account'}</strong><small>{googleUser.email}</small></span></div><button className="btn" disabled={authBusy} onClick={async () => { try { setAuthBusy(true); await signOutGoogle(); googleUserRef.current = null; setGoogleUser(null); setAccountError(''); } catch (caught) { setAccountError(caught instanceof Error ? caught.message : 'Could not sign out.'); } finally { setAuthBusy(false); } }}><LogOut size={15} />Sign out</button></> : <button className="btn google-btn" disabled={authBusy} onClick={async () => { try { setAuthBusy(true); await signInWithGoogle(); } catch (caught) { setAccountError(caught instanceof Error ? caught.message : 'Google sign-in was canceled.'); } finally { setAuthBusy(false); } }}><span className="google-g">G</span>{authBusy ? 'Opening Google…' : 'Sign in with Google'}</button>}</div>}
-          {browserMode && <p className="install-note">Sign in to keep your local scores and history synced with this Google account on your other devices.</p>}
           {accountError && <div role="alert" className="inline-error account-error">{accountError} {googleUser && <button className="text-btn" disabled={authBusy} onClick={() => void retryGoogleSync()}>Try again</button>}</div>}
           <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'rename', name: profileName }); if (next) setModal(null); }}><label className="field-label" htmlFor="player-name">Player name</label><input id="player-name" className="field" autoFocus maxLength={32} placeholder="David" value={profileName} onChange={event => setProfileName(event.target.value)} required /><button className="btn primary" style={{ width: '100%', marginTop: 15 }} disabled={busy || !profileName.trim()}>Save<Check size={16} /></button></form>
         </>}
@@ -604,7 +603,7 @@ export default function Home() {
         </>}
 
         {modal === 'new' && <><DialogHeader><DialogTitle>Start a new game?</DialogTitle><DialogDescription>This game isn’t finished. Starting over will save it as unfinished.</DialogDescription></DialogHeader><div className="actions"><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy || !host} onClick={() => void beginNewGame()}>Start new game<ArrowRight size={15} /></button></div>{error && <p className="inline-error">{error}</p>}</>}
-        {modal === 'finish' && <><DialogHeader><DialogTitle>Final score</DialogTitle><DialogDescription>{me?.name === 'You' ? 'Your' : `${firstName(me?.name || 'Your')}’s`} game is complete.</DialogDescription></DialogHeader><div><div className="finish-line"><span>Upper section</span><strong><Count value={score.upper} /></strong></div>{phase >= 1 && <div className="finish-line"><span>Upper bonus</span><strong>{score.upperBonus ? <>+<Count value={35} /></> : <Count value={0} />}</strong></div>}{phase >= 2 && <div className="finish-line"><span>Lower section {sheet?.bonus ? '(includes Yahtzee bonus)' : ''}</span><strong><Count value={score.lower} /></strong></div>}</div><div className="finish-score"><p>GRAND TOTAL</p><strong><Count value={phase >= 3 ? score.total : 0} duration={700} /></strong></div><p className="install-note">{googleUser && browserMode ? 'Saved locally and synced with your Google account.' : browserMode ? 'Saved in this browser’s game history.' : game?.ended_at ? 'Saved with everyone’s scores in game history.' : 'Your score is saved. The final result will appear when everyone finishes.'}</p><div className="actions"><button className="btn" onClick={() => { setModal(null); setHomeTab('history'); }}>Game history</button><button className="btn primary" onClick={() => { setModal(null); setHomeTab('home'); }}>Back home<ArrowRight size={15} /></button></div></>}
+        {modal === 'finish' && <><DialogHeader><DialogTitle>Final score</DialogTitle><DialogDescription>{me?.name === 'You' ? 'Your' : `${firstName(me?.name || 'Your')}’s`} game is complete.</DialogDescription></DialogHeader><div><div className="finish-line"><span>Upper section</span><strong><Count value={score.upper} /></strong></div>{phase >= 1 && <div className="finish-line"><span>Upper bonus</span><strong>{score.upperBonus ? <>+<Count value={35} /></> : <Count value={0} />}</strong></div>}{phase >= 2 && <div className="finish-line"><span>Lower section {sheet?.bonus ? '(includes Yahtzee bonus)' : ''}</span><strong><Count value={score.lower} /></strong></div>}</div><div className="finish-score"><p>GRAND TOTAL</p><strong><Count value={phase >= 3 ? score.total : 0} duration={700} /></strong></div><div className="actions"><button className="btn" onClick={() => { setModal(null); setHomeTab('history'); }}>Game history</button><button className="btn primary" onClick={() => { setModal(null); setHomeTab('home'); }}>Back home<ArrowRight size={15} /></button></div></>}
       </DialogContent>
     </Dialog>
 
@@ -626,9 +625,28 @@ function HistoryCard({ game, canDelete, onDelete }: { game: Game; canDelete: boo
   const sorted = [...game.sheets].sort((a, b) => totals(b.scores, b.bonus).total - totals(a.scores, a.bonus).total);
   const top = sorted[0], high = top ? totals(top.scores, top.bonus).total : 0;
   const winners = sorted.filter(item => totals(item.scores, item.bonus).total === high);
+  const scoreRows = [
+    ...categories.map(category => ({ id: category.id, name: category.name, value: (item: Sheet) => item.scores[category.id] ?? '—' })),
+    { id: 'upper-bonus', name: 'Upper bonus', value: (item: Sheet) => totals(item.scores, item.bonus).upperBonus },
+    { id: 'yahtzee-bonus', name: 'Yahtzee bonus', value: (item: Sheet) => item.bonus * 100 },
+    { id: 'total', name: 'Total', value: (item: Sheet) => totals(item.scores, item.bonus).total },
+  ];
   return <details className="history-card">
-    <summary><div><h3>{fmtTime(game.started_at)} <span style={{ fontWeight: 400, color: '#91a095', margin: '0 5px' }}>·</span> {game.sheets.length} {game.sheets.length === 1 ? 'player' : 'players'}</h3><p>{game.ended_at ? `${Math.max(1, Math.round((game.ended_at - game.started_at) / 60000))} min · ${sorted.length === 1 ? 'Solo game' : winners.length > 1 ? 'Shared victory' : `${top?.name} won`}` : 'Unfinished game · not counted in wins'}</p><div className="history-players">{sorted.map(item => <Avatar key={item.player_id} name={item.name} photoUrl={item.photo_url} />)}</div></div><span className="inline"><span className={`pill ${game.ended_at ? '' : 'neutral'}`}>{game.ended_at ? <Trophy size={13} /> : <Flag size={13} />} {game.ended_at ? `${high} pts` : 'Unfinished'}</span><ChevronDown size={16} /></span></summary>
+    <summary>
+      <div className="history-summary-main">
+        <h3>{fmtTime(game.started_at)} <span>·</span> {game.sheets.length} {game.sheets.length === 1 ? 'player' : 'players'}</h3>
+        <p>{game.ended_at ? `${Math.max(1, Math.round((game.ended_at - game.started_at) / 60000))} min · ${sorted.length === 1 ? 'Solo game' : winners.length > 1 ? 'Shared victory' : `${top?.name} won`}` : 'Unfinished game · not counted in wins'}</p>
+      </div>
+      {top && <div className="history-winner"><Avatar name={top.name} photoUrl={top.photo_url} /><span>{top.name}</span></div>}
+      <span className="history-score"><span className={`pill ${game.ended_at ? '' : 'neutral'}`}>{game.ended_at ? <Trophy size={13} /> : <Flag size={13} />} {game.ended_at ? `${high} pts` : 'Unfinished'}</span><ChevronDown size={16} /></span>
+    </summary>
     {canDelete && <button className="history-delete" aria-label={`Delete game from ${fmtTime(game.started_at)}`} onClick={event => { event.preventDefault(); onDelete(); }}><Trash2 size={17} /></button>}
-    <div className="history-results">{sorted.map((item, index) => <div className="player-row" key={item.player_id}><span className="player-rank">{index + 1}</span><Avatar name={item.name} photoUrl={item.photo_url} /><span className="player-name">{item.name}<small>{item.completed_at ? 'Finished' : `${totals(item.scores, item.bonus).filled} of 13 scored`}</small></span><span className="player-score">{totals(item.scores, item.bonus).total}</span></div>)}<div className="table-scroll"><Table><TableHeader><TableRow><TableHead>Category</TableHead>{sorted.map(item => <TableHead key={item.player_id}>{item.name}</TableHead>)}</TableRow></TableHeader><TableBody>{categories.map(category => <TableRow key={category.id}><TableCell>{category.name}</TableCell>{sorted.map(item => <TableCell key={item.player_id}>{item.scores[category.id] ?? '—'}</TableCell>)}</TableRow>)}<TableRow><TableCell>Upper bonus</TableCell>{sorted.map(item => <TableCell key={item.player_id}>{totals(item.scores, item.bonus).upperBonus}</TableCell>)}</TableRow><TableRow><TableCell>Yahtzee bonus</TableCell>{sorted.map(item => <TableCell key={item.player_id}>{item.bonus * 100}</TableCell>)}</TableRow><TableRow><TableCell><strong>Total</strong></TableCell>{sorted.map(item => <TableCell key={item.player_id}><strong>{totals(item.scores, item.bonus).total}</strong></TableCell>)}</TableRow></TableBody></Table></div></div>
+    <div className="history-results">
+      <div className="history-standings">{sorted.map((item, index) => <div className="player-row" key={item.player_id}><span className="player-rank">{index + 1}</span><Avatar name={item.name} photoUrl={item.photo_url} /><span className="player-name">{item.name}<small>{item.completed_at ? 'Finished' : `${totals(item.scores, item.bonus).filled} of 13 scored`}</small></span><span className="player-score">{totals(item.scores, item.bonus).total}</span></div>)}</div>
+      {sorted.map(item => <div className="history-scorecard" key={item.player_id}>
+        <div className="history-scorecard-head"><span>{item.name}</span><strong>{totals(item.scores, item.bonus).total}</strong></div>
+        <div className="history-score-grid">{scoreRows.map(row => <div className={`history-score-cell ${row.id === 'total' ? 'total' : ''}`} key={row.id}><span>{row.name}</span><strong>{row.value(item)}</strong></div>)}</div>
+      </div>)}
+    </div>
   </details>;
 }
