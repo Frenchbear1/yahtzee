@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import {
   ArrowRight, ArrowUpRight, Check, ChevronDown, Dice1, Dice2, Dice3, Dice4, Dice5, Dice6,
   Cloud, Dices, Flag, History, Home as HomeIcon, House, Layers, LogIn, LogOut,
-  Play, Plus, Share2, Sparkles, Star, Trash2, TrendingUp, Trophy, UserPlus, Users, X,
+  Play, Plus, Share2, Sparkles, Star, Trash2, TrendingUp, Trophy, UserPlus, X,
 } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
@@ -13,8 +13,9 @@ import { Progress } from '@/components/ui/progress';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Toaster, toast } from 'sonner';
 import { bonusPlans, categories, gameHasMoves, leaderboard, totals, type Category, type Game, type Sheet, type State } from '@/lib/game';
-import { browserGameRequest, exportBrowserCloudData, mergeBrowserCloudData } from '@/lib/browser-game';
-import { getGoogleIdToken, loadGoogleScores, saveGoogleScores, signInWithGoogle, signOutGoogle, watchGoogleAccount, type GoogleAccount } from '@/lib/firebase-profile';
+import { browserGameRequest } from '@/lib/browser-game';
+import { firebaseGameRequest } from '@/lib/firebase-game';
+import { getGoogleIdToken, signInWithGoogle, signOutGoogle, watchGoogleAccount, type GoogleAccount } from '@/lib/firebase-profile';
 
 const icons = [Dice1, Dice2, Dice3, Dice4, Dice5, Dice6, Layers, Layers, House, TrendingUp, ArrowUpRight, Star, Dices];
 const yahtzeeCategory = categories.find(category => category.id === 'yahtzee')!;
@@ -84,7 +85,6 @@ export default function Home() {
   const [savingCount, setSavingCount] = useState(0);
   const [googleUser, setGoogleUser] = useState<GoogleAccount | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
-  const [cloudSaving, setCloudSaving] = useState(false);
   const token = useRef('');
   const googleUserRef = useRef<GoogleAccount | null>(null);
   const snapshot = useRef<State | null>(null);
@@ -93,7 +93,6 @@ export default function Home() {
   const mutationQueue = useRef<Promise<void>>(Promise.resolve());
   const pendingMutations = useRef<OptimisticMutation[]>([]);
   const mutationId = useRef(0);
-  const cloudQueue = useRef<Promise<void>>(Promise.resolve());
   const initialViewChosen = useRef(false);
   const celebrateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -102,7 +101,7 @@ export default function Home() {
   const sheet = game?.sheets.find(item => item.player_id === me?.id);
   const score = totals(sheet?.scores, sheet?.bonus);
   const host = state?.room.host_id === me?.id;
-  const browserMode = state?.mode === 'browser' || pagesBuild;
+  const browserMode = state?.mode === 'browser' || (pagesBuild && state?.mode !== 'online');
   const lanMode = state?.mode === 'lan';
   const plans = useMemo(() => bonusPlans(sheet?.scores || {}, 3), [sheet?.scores]);
   const activePlan = bonusPlanIndex >= 0 && plans.length ? plans[bonusPlanIndex % plans.length] : null;
@@ -122,25 +121,11 @@ export default function Home() {
     if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate([50, 50, 80]);
   }, []);
 
-  const queueGoogleSave = useCallback((user = googleUserRef.current) => {
-    if (!user || typeof window === 'undefined' || !window.__YAHTZEE_PAGES__) return;
-    const cloudState = exportBrowserCloudData();
-    setCloudSaving(true);
-    const save = async () => {
-      try {
-        await saveGoogleScores(user.uid, cloudState);
-        setAccountError('');
-      } catch (caught) {
-        setAccountError(caught instanceof Error ? `Google score sync: ${caught.message}` : 'Google score sync is unavailable.');
-      } finally {
-        setCloudSaving(false);
-      }
-    };
-    cloudQueue.current = cloudQueue.current.then(save, save);
-  }, []);
-
   const requestState = useCallback(async (data: Record<string, unknown>, playerToken = token.current): Promise<State> => {
-    if (typeof window !== 'undefined' && window.__YAHTZEE_PAGES__) return browserGameRequest(data);
+    if (typeof window !== 'undefined' && window.__YAHTZEE_PAGES__) {
+      const user = googleUserRef.current;
+      return user ? firebaseGameRequest(data, user) : browserGameRequest(data);
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
@@ -189,7 +174,6 @@ export default function Home() {
         const next = await requestState(data, playerToken);
         if (playerToken === token.current) {
           applyServerState(next);
-          if (!['bootstrap', 'refresh'].includes(String(data.action || ''))) queueGoogleSave();
         }
         return next;
       } catch (caught) {
@@ -208,7 +192,7 @@ export default function Home() {
     const queued = apiQueue.current.then(run, run);
     apiQueue.current = queued;
     return queued;
-  }, [applyServerState, queueGoogleSave, requestState]);
+  }, [applyServerState, requestState]);
 
   const refreshRef = useRef<() => Promise<unknown>>(async () => {});
   refreshRef.current = () => api({ action: 'refresh' }, true);
@@ -224,7 +208,6 @@ export default function Home() {
       pendingMutations.current = pendingMutations.current.filter(item => item.id !== mutation.id);
       setSavingCount(pendingMutations.current.length);
       applyServerState(next);
-      queueGoogleSave();
     } catch (caught) {
       pendingMutations.current = pendingMutations.current.filter(item => item.id !== mutation.id);
       setSavingCount(pendingMutations.current.length);
@@ -288,18 +271,25 @@ export default function Home() {
       if (stopped) return;
       googleUserRef.current = user;
       setGoogleUser(user);
-      if (!user) { setAccountError(''); return; }
+      if (!user) {
+        setAccountError('');
+        if (pagesBuild) await api({ action: 'bootstrap' });
+        return;
+      }
       try {
         setAuthBusy(true);
         await getGoogleIdToken(user);
-        if (pagesBuild) {
-          const cloudState = await loadGoogleScores(user.uid);
-          const merged = mergeBrowserCloudData(cloudState, { name: user.displayName, photoUrl: user.photoURL });
-          applyServerState(merged);
-        }
-        const next = await api({ action: 'bootstrap' });
+        const linkedCode = pagesBuild ? new URLSearchParams(window.location.search).get('table') : null;
+        const next = await api(linkedCode ? { action: 'join-room', code: linkedCode } : { action: 'bootstrap' });
         if (next) await api({ action: 'sync-profile', name: user.displayName || 'Player', photoUrl: user.photoURL });
-        queueGoogleSave(user);
+        if (next && linkedCode) {
+          const url = new URL(window.location.href);
+          url.searchParams.delete('table');
+          window.history.replaceState({}, '', url);
+          setJoinCode('');
+          setModal(null);
+          toast.success('You joined the game.');
+        }
         setAccountError('');
       } catch (caught) {
         setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not finish.');
@@ -308,7 +298,7 @@ export default function Home() {
       }
     }).then(stop => { unsubscribe = stop; }).catch(caught => setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not load.'));
     return () => { stopped = true; unsubscribe?.(); };
-  }, [api, applyServerState, lanMode, pagesBuild, queueGoogleSave]);
+  }, [api, lanMode, pagesBuild]);
 
   useEffect(() => {
     if (modal !== 'finish') return;
@@ -395,10 +385,10 @@ export default function Home() {
     const invite = new URL(window.location.href);
     invite.search = '';
     invite.hash = '';
-    if (!browserMode) invite.searchParams.set('table', state.room.code);
+    invite.searchParams.set('table', state.room.code);
     const url = invite.toString();
     try {
-      const text = browserMode ? 'Open the Yahtzee scorekeeper and play with me.' : `Join my Yahtzee game with code ${state.room.code}.`;
+      const text = `Join my Yahtzee game with code ${state.room.code}.`;
       if (navigator.share) await navigator.share({ title: 'Play Yahtzee with me', text, url });
       else { await navigator.clipboard.writeText(url); toast.success('Invite link copied'); }
     } catch (caught) {
@@ -439,13 +429,8 @@ export default function Home() {
     try {
       setAuthBusy(true);
       await getGoogleIdToken(user, true);
-      if (pagesBuild) {
-        const cloudState = await loadGoogleScores(user.uid);
-        applyServerState(mergeBrowserCloudData(cloudState, { name: user.displayName, photoUrl: user.photoURL }));
-      }
       const next = await api({ action: 'bootstrap' });
       if (next) await api({ action: 'sync-profile', name: user.displayName || 'Player', photoUrl: user.photoURL });
-      queueGoogleSave(user);
       setAccountError('');
     } catch (caught) {
       setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not finish.');
@@ -546,10 +531,10 @@ export default function Home() {
             </section>
 
             <section className="players-card">
-              <div className="card-heading"><div><p className="eyebrow">Players</p><h2>{lanMode ? 'On your Wi-Fi' : 'Ready to play'}</h2></div><span className="pill neutral"><Count value={activePlayers.length || 1} /> active</span></div>
+              <div className="card-heading"><div><p className="eyebrow">Players</p><h2>Ready to play</h2></div><span className="pill neutral"><Count value={activePlayers.length || 1} /> active</span></div>
               <div className="active-player-list">{(state?.players.length ? state.players : me ? [{ ...me, active: true }] : []).map(player => <div className="active-player" key={player.id}><Avatar name={player.name} photoUrl={player.photo_url} /><span><strong>{player.name}{player.id === me?.id && player.name !== 'You' ? ' (you)' : ''}</strong><small>{player.active ? 'Ready now' : 'Away'}</small></span><span className={`presence ${player.active ? 'online' : ''}`} aria-label={player.active ? 'Active' : 'Away'} /></div>)}</div>
-              {!browserMode && <form className="join-inline" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'join-room', code: joinCode }); if (next) { setJoinCode(''); toast.success('You joined the game.'); } }}><label className="field-label" htmlFor="home-join-code">Have an invite code?</label><div className="inline"><input id="home-join-code" className="field" placeholder="ABCD" autoCapitalize="characters" autoCorrect="off" maxLength={8} value={joinCode} onChange={event => setJoinCode(event.target.value.toUpperCase())} /><button className="btn" disabled={busy || ![4, 8].includes(joinCode.replace(/[^a-z0-9]/gi, '').length)}>Join<ArrowRight size={14} /></button></div></form>}
-              {googleUser && browserMode && <div className="cloud-note"><Cloud size={16} /><span><strong>{cloudSaving ? 'Syncing scores…' : 'Scores synced'}</strong><small>Available on devices signed into {googleUser.email || 'this Google account'}.</small></span></div>}
+              {!browserMode && <form className="join-inline" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'join-room', code: joinCode }); if (next) { setJoinCode(''); toast.success('You joined the game.'); } }}><label className="field-label" htmlFor="home-join-code">Have an invite code?</label><div className="inline"><input id="home-join-code" className="field" placeholder="ABC123" autoCapitalize="characters" autoCorrect="off" maxLength={8} value={joinCode} onChange={event => setJoinCode(event.target.value.toUpperCase())} /><button className="btn" disabled={busy || ![4, 6, 8].includes(joinCode.replace(/[^a-z0-9]/gi, '').length)}>Join<ArrowRight size={14} /></button></div></form>}
+              {googleUser && state?.mode === 'online' && <div className="cloud-note"><Cloud size={16} /><span><strong>Online game connected</strong><small>Players can join from any network with the invite link or code.</small></span></div>}
             </section>
           </div>
         </TabsContent>
@@ -593,12 +578,14 @@ export default function Home() {
         </>}
 
         {modal === 'invite' && <>
-          <DialogHeader><DialogTitle>Invite a player</DialogTitle><DialogDescription>{browserMode ? 'Share the scorekeeper. For live multi-device play, open the local edition on the same Wi-Fi.' : 'Share this link or code. Connected players appear on Home automatically.'}</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>Invite a player</DialogTitle><DialogDescription>{browserMode ? 'Sign in with Google to create or join an online game.' : 'Share this link or code. Players can join from any network and will appear on Home automatically.'}</DialogDescription></DialogHeader>
+          {browserMode && !googleUser && <button className="btn google-btn" disabled={authBusy} onClick={async () => { try { setAuthBusy(true); await signInWithGoogle(); } catch (caught) { setAccountError(caught instanceof Error ? caught.message : 'Google sign-in was canceled.'); } finally { setAuthBusy(false); } }}><span className="google-g">G</span>{authBusy ? 'Opening Google…' : 'Sign in to play online'}</button>}
           {me?.name === 'You' && <button className="btn" onClick={() => { setProfileName(''); setModal('profile'); }}>First, add your name<ArrowRight size={15} /></button>}
           {state && !browserMode && <div className="room-code">{state.room.code}</div>}
-          <button className="btn primary share-table" onClick={() => void shareTable()}><Share2 size={16} />Share invite</button>
-          {!browserMode && <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'join-room', code: joinCode }); if (next) { setModal(null); setJoinCode(''); toast.success('You joined the game.'); } }}><label className="field-label" htmlFor="join-code">Invite code</label><div className="inline"><input id="join-code" className="field" placeholder="ABCD" autoCapitalize="characters" autoCorrect="off" maxLength={8} value={joinCode} onChange={event => setJoinCode(event.target.value.toUpperCase())} /><button className="btn" disabled={busy || ![4, 8].includes(joinCode.replace(/[^a-z0-9]/gi, '').length)}>Join<ArrowRight size={14} /></button></div></form>}
-          {browserMode && <a className="btn" href="./yahtzee-local.zip" download><Users size={16} />Get Wi-Fi multiplayer</a>}
+          {!browserMode && <button className="btn primary share-table" onClick={() => void shareTable()}><Share2 size={16} />Share invite</button>}
+          {!browserMode && <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'join-room', code: joinCode }); if (next) { setModal(null); setJoinCode(''); toast.success('You joined the game.'); } }}><label className="field-label" htmlFor="join-code">Invite code</label><div className="inline"><input id="join-code" className="field" placeholder="ABC123" autoCapitalize="characters" autoCorrect="off" maxLength={8} value={joinCode} onChange={event => setJoinCode(event.target.value.toUpperCase())} /><button className="btn" disabled={busy || ![4, 6, 8].includes(joinCode.replace(/[^a-z0-9]/gi, '').length)}>Join<ArrowRight size={14} /></button></div></form>}
+          {browserMode && <p className="install-note">After signing in, this screen will show your room code and manual join box.</p>}
+          {accountError && <div role="alert" className="inline-error">{accountError}</div>}
           {error && <div role="alert" className="inline-error">{error}</div>}
         </>}
 

@@ -215,7 +215,7 @@ export async function browserGameRequest(body: Record<string, unknown>): Promise
   } else if (action === 'join-room') {
     const wanted = String(body.code || '').replace(/[^a-z0-9]/gi, '').toUpperCase();
     const room = store.rooms.find(item => item.code === wanted);
-    if (!room) fail('Live shared games need the Wi-Fi edition. This Pages edition keeps multiplayer scores on one device.');
+    if (!room) fail('Sign in with Google to join an online game from this device.');
     store.currentRoom = room.id;
   } else if (action === 'score' || action === 'bonus') {
     const game = roomGames(store).find(item => item.id === String(body.gameId || '')) || fail('This score sheet is not available.', 404);

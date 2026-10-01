@@ -1,23 +1,21 @@
 # Yahtzee
 
-A mobile-first Yahtzee scorekeeper with a home screen for game setup, invitations, connected players, history, and the leaderboard. During a game, the interface stays focused on the score sheet.
+A mobile-first Yahtzee scorekeeper with online rooms, invitations, connected players, history, and a leaderboard. During a game, the interface stays focused on the score sheet.
 
-## GitHub Pages edition
+## Online multiplayer
 
-The public GitHub Pages build saves immediately in browser storage. When a player signs in with Google, existing local games are merged into their private Firestore score history and become available on other signed-in devices. Blank games are never uploaded or shown in game history.
+The public GitHub Pages app saves solo games immediately in browser storage. Signing in with Google connects the app to shared Firestore rooms so players can join from any phone or tablet, on any network.
 
-The Pages build remains a single-device scorekeeper. Use the downloadable local network edition for live multi-device play.
+Tap **Invite player** to share a deep link or the six-character room code. Opening an invite link fills the code and joins automatically after Google sign-in. The same dialog also accepts a code typed by hand. Connected players and score changes refresh automatically.
 
-## Local network edition
+Firestore rules must be deployed for online rooms:
 
-Choose **Invite player → Get Wi-Fi multiplayer** in the app. Unzip on one computer with Node 22.13 or newer and run `node start.mjs`. Every phone opens the host's displayed LAN address and joins with the same invite code. The computer must remain awake. No internet or accounts are required during play.
-
-The local edition uses the same React UI and API logic with a local SQLite adapter. Active players on the same hosted game appear automatically on Home. Its scores are separate from the GitHub Pages app. Keep the `yahtzee-scores.sqlite` file and the same browser identity on each phone. Detailed instructions are included in the download.
+```sh
+npx firebase-tools deploy --only firestore:rules
+```
 
 ## Development
 
-- `node scripts/build-local.mjs` builds the downloadable edition from the current UI and API source.
 - `npm run build:pages` builds the static GitHub Pages edition into `.pages-dist`.
-- `npx firebase-tools deploy --only firestore:rules` publishes the private per-account score-sync rules.
-- `node tests/game-api.mjs` validates the compiled local API against an in-memory SQLite database. Build the local edition first.
+- `npx firebase-tools deploy --only firestore:rules` publishes the online-room and private score-history rules.
 - `node node_modules/typescript/bin/tsc --noEmit` checks application types.

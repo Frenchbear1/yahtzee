@@ -1,4 +1,4 @@
-type FirebaseUser = {
+export type FirebaseUser = {
   uid: string;
   displayName: string | null;
   email: string | null;
@@ -6,7 +6,57 @@ type FirebaseUser = {
   getIdToken: (forceRefresh?: boolean) => Promise<string>;
 };
 
-type FirebaseCompat = {
+export type FirebaseDocumentSnapshot = {
+  id: string;
+  exists: boolean;
+  data: () => Record<string, unknown> | undefined;
+};
+
+export type FirebaseDocumentReference = {
+  id: string;
+  path: string;
+  get: () => Promise<FirebaseDocumentSnapshot>;
+  set: (data: unknown, options?: { merge?: boolean }) => Promise<void>;
+  update: (data: unknown) => Promise<void>;
+  delete: () => Promise<void>;
+  collection: (path: string) => FirebaseCollectionReference;
+};
+
+export type FirebaseQuerySnapshot = { docs: FirebaseDocumentSnapshot[] };
+
+export type FirebaseQuery = {
+  where: (field: string, operator: 'array-contains' | '==', value: unknown) => FirebaseQuery;
+  orderBy: (field: string, direction?: 'asc' | 'desc') => FirebaseQuery;
+  limit: (count: number) => FirebaseQuery;
+  get: () => Promise<FirebaseQuerySnapshot>;
+};
+
+export type FirebaseCollectionReference = FirebaseQuery & {
+  doc: (id?: string) => FirebaseDocumentReference;
+};
+
+export type FirebaseTransaction = {
+  get: (reference: FirebaseDocumentReference) => Promise<FirebaseDocumentSnapshot>;
+  set: (reference: FirebaseDocumentReference, data: unknown, options?: { merge?: boolean }) => FirebaseTransaction;
+  update: (reference: FirebaseDocumentReference, data: unknown) => FirebaseTransaction;
+  delete: (reference: FirebaseDocumentReference) => FirebaseTransaction;
+};
+
+export type FirebaseWriteBatch = {
+  set: (reference: FirebaseDocumentReference, data: unknown, options?: { merge?: boolean }) => FirebaseWriteBatch;
+  update: (reference: FirebaseDocumentReference, data: unknown) => FirebaseWriteBatch;
+  delete: (reference: FirebaseDocumentReference) => FirebaseWriteBatch;
+  commit: () => Promise<void>;
+};
+
+export type FirebaseFirestore = {
+  doc: (path: string) => FirebaseDocumentReference;
+  collection: (path: string) => FirebaseCollectionReference;
+  runTransaction: <T>(callback: (transaction: FirebaseTransaction) => Promise<T>) => Promise<T>;
+  batch: () => FirebaseWriteBatch;
+};
+
+export type FirebaseCompat = {
   apps: unknown[];
   initializeApp: (config: typeof firebaseConfig) => unknown;
   auth: (() => {
@@ -14,12 +64,7 @@ type FirebaseCompat = {
     signInWithPopup: (provider: unknown) => Promise<{ user: FirebaseUser }>;
     signOut: () => Promise<void>;
   }) & { GoogleAuthProvider: new () => unknown };
-  firestore: () => {
-    doc: (path: string) => {
-      get: () => Promise<{ exists: boolean; data: () => unknown }>;
-      set: (data: unknown) => Promise<void>;
-    };
-  };
+  firestore: () => FirebaseFirestore;
 };
 
 declare global {
@@ -72,6 +117,10 @@ async function firebase() {
     })();
   }
   return loading;
+}
+
+export async function getFirebaseFirestore() {
+  return (await firebase()).firestore();
 }
 
 export async function watchGoogleAccount(callback: (user: GoogleAccount | null) => void) {
