@@ -15,7 +15,7 @@ import { Toaster, toast } from 'sonner';
 import { bonusPlans, categories, gameHasMoves, leaderboard, totals, type Category, type Game, type Sheet, type State } from '@/lib/game';
 import { browserGameRequest } from '@/lib/browser-game';
 import { firebaseGameRequest } from '@/lib/firebase-game';
-import { getGoogleIdToken, signInWithGoogle, signOutGoogle, watchGoogleAccount, type GoogleAccount } from '@/lib/firebase-profile';
+import { getGoogleIdToken, loadGoogleScores, signInWithGoogle, signOutGoogle, watchGoogleAccount, type GoogleAccount } from '@/lib/firebase-profile';
 
 const icons = [Dice1, Dice2, Dice3, Dice4, Dice5, Dice6, Layers, Layers, House, TrendingUp, ArrowUpRight, Star, Dices];
 const yahtzeeCategory = categories.find(category => category.id === 'yahtzee')!;
@@ -280,7 +280,8 @@ export default function Home() {
         setAuthBusy(true);
         await getGoogleIdToken(user);
         const linkedCode = pagesBuild ? new URLSearchParams(window.location.search).get('table') : null;
-        const next = await api(linkedCode ? { action: 'join-room', code: linkedCode } : { action: 'bootstrap' });
+        const legacyState = pagesBuild && !linkedCode ? await loadGoogleScores(user.uid) : null;
+        const next = await api(linkedCode ? { action: 'join-room', code: linkedCode } : { action: 'bootstrap', legacyState });
         if (next) await api({ action: 'sync-profile', name: user.displayName || 'Player', photoUrl: user.photoURL });
         if (next && linkedCode) {
           const url = new URL(window.location.href);
@@ -429,7 +430,8 @@ export default function Home() {
     try {
       setAuthBusy(true);
       await getGoogleIdToken(user, true);
-      const next = await api({ action: 'bootstrap' });
+      const legacyState = pagesBuild ? await loadGoogleScores(user.uid) : null;
+      const next = await api({ action: 'bootstrap', legacyState });
       if (next) await api({ action: 'sync-profile', name: user.displayName || 'Player', photoUrl: user.photoURL });
       setAccountError('');
     } catch (caught) {

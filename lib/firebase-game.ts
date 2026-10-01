@@ -1,4 +1,4 @@
-import { totals, validScore, type Game, type Room, type Scores, type Sheet, type State } from './game';
+import { gameHasMoves, totals, validScore, type Game, type Room, type Scores, type Sheet, type State } from './game';
 import {
   getFirebaseFirestore,
   type FirebaseFirestore,
@@ -145,6 +145,40 @@ function parseStoredGame(id: string, value: unknown): StoredGame {
   };
 }
 
+function legacyGames(value: unknown, user: FirebaseUser, roomId: string) {
+  const data = object(value);
+  if (data.version !== 1 || !Array.isArray(data.games)) return [];
+  const me = profile(user);
+  const seen = new Set<string>();
+  const games: StoredGame[] = [];
+  for (const rawGame of data.games.slice(0, maxHistory - 1)) {
+    const source = object(rawGame);
+    const rawSheets = Array.isArray(source.sheets) ? source.sheets : [];
+    const rawSheet = rawSheets[0];
+    if (!rawSheet) continue;
+    const proposedId = String(source.id || '');
+    const gameId = /^[a-zA-Z0-9_-]{1,128}$/.test(proposedId) && !seen.has(proposedId) ? proposedId : crypto.randomUUID();
+    seen.add(gameId);
+    const migratedSheet = {
+      ...parseSheet(gameId, user.uid, rawSheet),
+      game_id: gameId,
+      player_id: user.uid,
+      name: me.name,
+      photo_url: me.photo_url,
+    };
+    const game: StoredGame = {
+      id: gameId,
+      room_id: roomId,
+      started_at: Number(source.started_at) || Date.now(),
+      ended_at: typeof source.ended_at === 'number' ? source.ended_at : migratedSheet.completed_at,
+      updated_at: Date.now(),
+      sheets: { [user.uid]: migratedSheet },
+    };
+    if (gameHasMoves(displayGame(game, new Map()))) games.push(game);
+  }
+  return games;
+}
+
 function publicRoom(room: RoomRecord): Room {
   return { id: room.id, name: room.name, code: room.code, host_id: room.host_id };
 }
@@ -173,13 +207,14 @@ async function findCurrentRoom(db: FirebaseFirestore, userId: string) {
   return rooms[0];
 }
 
-async function createRoom(db: FirebaseFirestore, user: FirebaseUser, roomName: unknown = 'My game') {
+async function createRoom(db: FirebaseFirestore, user: FirebaseUser, roomName: unknown = 'My game', legacyState?: unknown) {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const roomId = crypto.randomUUID();
     const gameId = crypto.randomUUID();
     const code = inviteCode();
     const now = Date.now();
     const me = profile(user);
+    const migratedGames = legacyGames(legacyState, user, roomId);
     try {
       await db.runTransaction(async transaction => {
         const codeReference = db.doc(`${codeCollection}/${code}`);
@@ -204,6 +239,7 @@ async function createRoom(db: FirebaseFirestore, user: FirebaseUser, roomName: u
           updated_at: now,
           sheets: { [user.uid]: blankSheet(gameId, me) },
         });
+        for (const migrated of migratedGames) transaction.set(gameRef(db, roomId, migrated.id), migrated);
       });
       rememberRoom(user.uid, roomId);
       return roomId;
@@ -214,10 +250,10 @@ async function createRoom(db: FirebaseFirestore, user: FirebaseUser, roomName: u
   fail('Could not reserve an invite code. Please try again.', 503);
 }
 
-async function ensureRoom(db: FirebaseFirestore, user: FirebaseUser) {
+async function ensureRoom(db: FirebaseFirestore, user: FirebaseUser, legacyState?: unknown) {
   const current = await findCurrentRoom(db, user.uid);
   if (current) return current;
-  const roomId = await createRoom(db, user);
+  const roomId = await createRoom(db, user, 'My game', legacyState);
   const document = await roomRef(db, roomId).get();
   return parseRoom(document.id, document.data());
 }
@@ -473,7 +509,7 @@ export async function firebaseGameRequest(body: Record<string, unknown>, user: F
       await joinRoom(db, user, body.code);
       return await snapshot(db, user);
     }
-    let room = await ensureRoom(db, user);
+    let room = await ensureRoom(db, user, body.legacyState);
 
     if (action === 'rename') {
       await updateProfile(db, user, body.name, user.photoURL);
