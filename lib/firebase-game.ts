@@ -535,8 +535,22 @@ export async function firebaseGameRequest(body: Record<string, unknown>, user: F
         const document = await transaction.get(reference);
         if (!document.exists) fail('That game was not found.', 404);
         const latest = parseRoom(document.id, document.data());
-        transaction.update(reference, { member_ids: latest.member_ids.filter(id => id !== playerId), updated_at: Date.now() });
+        if (!latest.member_ids.includes(playerId)) fail('That player is no longer in this game.', 404);
+        const currentGameReference = gameRef(db, room.id, latest.current_game_id);
+        const currentGameDocument = await transaction.get(currentGameReference);
+        const currentGame = currentGameDocument.exists ? parseStoredGame(currentGameDocument.id, currentGameDocument.data()) : null;
+        const updatedAt = Date.now();
+        transaction.update(reference, { member_ids: latest.member_ids.filter(id => id !== playerId), updated_at: updatedAt });
         transaction.delete(memberRef(db, room.id, playerId));
+        if (currentGame?.sheets[playerId] && !currentGame.ended_at) {
+          const sheets = { ...currentGame.sheets };
+          delete sheets[playerId];
+          const remainingSheets = Object.values(sheets);
+          const endedAt = remainingSheets.length > 0 && remainingSheets.every(sheet => sheet.completed_at)
+            ? currentGame.ended_at || updatedAt
+            : null;
+          transaction.update(currentGameReference, { sheets, ended_at: endedAt, updated_at: updatedAt });
+        }
       });
     } else if (action === 'score' || action === 'bonus') {
       await mutateScore(db, user, room, body);

@@ -79,6 +79,7 @@ export default function Home() {
   const [profileName, setProfileName] = useState('');
   const [joinCode, setJoinCode] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<{ id: string; name: string } | null>(null);
   const [bonusPlanIndex, setBonusPlanIndex] = useState(-1);
   const [celebrating, setCelebrating] = useState(false);
   const [phase, setPhase] = useState(0);
@@ -449,6 +450,15 @@ export default function Home() {
     toast.success('Game deleted');
   }
 
+  async function confirmPlayerRemoval() {
+    const target = removeTarget;
+    if (!target || !state) return;
+    const next = await api({ action: 'remove-member', roomId: state.room.id, playerId: target.id });
+    if (!next) return;
+    setRemoveTarget(null);
+    toast.success(`${target.name} was removed`);
+  }
+
   const live = game ? [...game.sheets].sort((a, b) => totals(b.scores, b.bonus).total - totals(a.scores, a.bonus).total) : [];
   const visibleHistory = state?.history.filter(gameHasMoves) || [];
   const played = visibleHistory.filter(item => item.ended_at);
@@ -535,7 +545,6 @@ export default function Home() {
             <section className="players-card">
               <div className="card-heading"><div><p className="eyebrow">Players</p><h2>Ready to play</h2></div><span className="pill neutral"><Count value={activePlayers.length || 1} /> active</span></div>
               <div className="active-player-list">{(state?.players.length ? state.players : me ? [{ ...me, active: true }] : []).map(player => <div className="active-player" key={player.id}><Avatar name={player.name} photoUrl={player.photo_url} /><span><strong>{player.name}{player.id === me?.id && player.name !== 'You' ? ' (you)' : ''}</strong><small>{player.active ? 'Ready now' : 'Away'}</small></span><span className={`presence ${player.active ? 'online' : ''}`} aria-label={player.active ? 'Active' : 'Away'} /></div>)}</div>
-              {!browserMode && <form className="join-inline" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'join-room', code: joinCode }); if (next) { setJoinCode(''); toast.success('You joined the game.'); } }}><label className="field-label" htmlFor="home-join-code">Have an invite code?</label><div className="inline"><input id="home-join-code" className="field" placeholder="ABC123" autoCapitalize="characters" autoCorrect="off" maxLength={8} value={joinCode} onChange={event => setJoinCode(event.target.value.toUpperCase())} /><button className="btn" disabled={busy || ![4, 6, 8].includes(joinCode.replace(/[^a-z0-9]/gi, '').length)}>Join<ArrowRight size={14} /></button></div></form>}
               {googleUser && state?.mode === 'online' && <div className="cloud-note"><Cloud size={16} /><span><strong>Online game connected</strong><small>Players can join from any network with the invite link or code.</small></span></div>}
             </section>
           </div>
@@ -586,6 +595,14 @@ export default function Home() {
           {state && !browserMode && <div className="room-code">{state.room.code}</div>}
           {!browserMode && <button className="btn primary share-table" onClick={() => void shareTable()}><Share2 size={16} />Share invite</button>}
           {!browserMode && <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'join-room', code: joinCode }); if (next) { setModal(null); setJoinCode(''); toast.success('You joined the game.'); } }}><label className="field-label" htmlFor="join-code">Invite code</label><div className="inline"><input id="join-code" className="field" placeholder="ABC123" autoCapitalize="characters" autoCorrect="off" maxLength={8} value={joinCode} onChange={event => setJoinCode(event.target.value.toUpperCase())} /><button className="btn" disabled={busy || ![4, 6, 8].includes(joinCode.replace(/[^a-z0-9]/gi, '').length)}>Join<ArrowRight size={14} /></button></div></form>}
+          {host && !browserMode && state && <section className="section-divider member-management" aria-labelledby="manage-people-heading">
+            <div className="card-heading"><div><p className="eyebrow">Room controls</p><h3 id="manage-people-heading">Manage people</h3></div><span className="pill neutral">{Math.max(0, state.players.length - 1)} joined</span></div>
+            {state.players.some(player => player.id !== me?.id) ? state.players.filter(player => player.id !== me?.id).map(player => <div className="managed-member" key={player.id}>
+              <Avatar name={player.name} photoUrl={player.photo_url} />
+              <span><strong>{player.name}</strong><small>{player.active ? 'Ready now' : 'Away'}</small></span>
+              <button type="button" className="btn remove-member" disabled={busy} aria-label={`Remove ${player.name}`} onClick={() => setRemoveTarget({ id: player.id, name: player.name })}><Trash2 size={15} /></button>
+            </div>) : <p className="install-note">No other people have joined yet.</p>}
+          </section>}
           {browserMode && <p className="install-note">After signing in, this screen will show your room code and manual join box.</p>}
           {accountError && <div role="alert" className="inline-error">{accountError}</div>}
           {error && <div role="alert" className="inline-error">{error}</div>}
@@ -603,6 +620,16 @@ export default function Home() {
           <AlertDialogDescription>Delete the {deleteTarget?.name} game and all of its scores?</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction className="delete-action" onClick={() => void confirmDeletion()}>Delete</AlertDialogAction></AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+
+    <AlertDialog open={!!removeTarget} onOpenChange={open => { if (!open) setRemoveTarget(null); }}>
+      <AlertDialogContent className="delete-dialog">
+        <AlertDialogHeader>
+          <AlertDialogTitle>Remove player?</AlertDialogTitle>
+          <AlertDialogDescription>Remove {removeTarget?.name} from this game? Their current unfinished score sheet will be removed too. They can rejoin later with an invite.</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction className="delete-action" disabled={busy} onClick={() => void confirmPlayerRemoval()}>Remove</AlertDialogAction></AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
 

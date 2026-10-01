@@ -156,6 +156,16 @@ service cloud.firestore {
           && request.resource.data.sheets is map;
         }
 
+        function hostSheetRemoval() {
+          let removedSheets = resource.data.sheets.keys().toSet().difference(request.resource.data.sheets.keys().toSet());
+          return isRoomHost(roomId)
+            && removedSheets.size() == 1
+            && request.resource.data.sheets.keys().toSet().difference(resource.data.sheets.keys().toSet()).size() == 0
+            && request.resource.data.sheets.diff(resource.data.sheets).affectedKeys().size() == 1
+            && get(roomPath(roomId)).data.member_ids.toSet().hasAll(removedSheets)
+            && !getAfter(roomPath(roomId)).data.member_ids.toSet().hasAny(removedSheets);
+        }
+
         allow read: if isRoomMember(roomId);
         allow create: if willBeRoomHost(roomId) && validGame();
         allow update: if (isRoomMember(roomId) || willBeRoomMember(roomId))
@@ -163,9 +173,12 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'sheets', 'ended_at', 'updated_at'
           ])
-          && request.resource.data.sheets.diff(resource.data.sheets).affectedKeys().hasOnly([
-            request.auth.uid
-          ]);
+          && (
+            request.resource.data.sheets.diff(resource.data.sheets).affectedKeys().hasOnly([
+              request.auth.uid
+            ])
+            || hostSheetRemoval()
+          );
         allow delete: if isRoomHost(roomId);
       }
     }
