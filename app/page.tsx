@@ -60,6 +60,27 @@ function Empty({ kind, title, body, action }: { kind: 'history' | 'trophy'; titl
   return <div className="empty-card"><Icon size={35} strokeWidth={1.4} /><h2>{title}</h2><p>{body}</p>{action}</div>;
 }
 
+const pendingKey = 'yahtzee-pending-v1';
+type StoredMutation = { body: Record<string, unknown>; gameId: string };
+
+// Rebuilds the on-screen change for a score saved on this phone while
+// offline, so it is still shown after the app is closed and reopened.
+function storedApply({ body, gameId }: StoredMutation) {
+  return (current: State): State => {
+    const updateGame = (item: Game): Game => item.id !== gameId ? item : {
+      ...item,
+      sheets: item.sheets.map(playerSheet => playerSheet.player_id !== current.me.id ? playerSheet
+        : body.action === 'bonus' ? { ...playerSheet, bonus: Number(body.bonus) || 0 }
+          : {
+            ...playerSheet,
+            scores: { ...playerSheet.scores, [String(body.category)]: body.value as number | null },
+            bonus: body.category === 'yahtzee' && body.value !== 50 ? 0 : playerSheet.bonus,
+          }),
+    };
+    return { ...current, game: updateGame(current.game), history: current.history.map(updateGame) };
+  };
+}
+
 type OptimisticMutation = { id: number; body: Record<string, unknown>; gameId: string; apply: (state: State) => State };
 type View = 'home' | 'game';
 
@@ -201,6 +222,7 @@ export default function Home() {
         const failure = caught as Error & { status?: number };
         if (failure.status === 409) setTimeout(() => { void refreshRef.current(); }, 100);
         const message = failure.name !== 'AbortError' ? failure.message : 'Connection lost. Your input is still here. Please try again.';
+        if (!navigator.onLine && (failure.status === 503 || failure instanceof TypeError)) { setReady(true); return null; }
         if (message.startsWith('Google sign-in')) setAccountError(message);
         else setError(message);
         setReady(true);
@@ -215,14 +237,23 @@ export default function Home() {
     return queued;
   }, [applyServerState, requestState]);
 
+  const enqueueRef = useRef<(mutation: Omit<OptimisticMutation, 'id'>) => void>(() => {});
   const refreshRef = useRef<() => Promise<unknown>>(async () => {});
   refreshRef.current = () => api({ action: 'refresh' }, true);
+
+  function savePending() {
+    try {
+      const list: StoredMutation[] = pendingMutations.current.map(item => ({ body: item.body, gameId: item.gameId }));
+      if (list.length) localStorage.setItem(pendingKey, JSON.stringify(list));
+      else localStorage.removeItem(pendingKey);
+    } catch {}
+  }
 
   async function persistMutation(mutation: OptimisticMutation) {
     try {
       let next: State | null = null;
-      // A dropped connection keeps the score on screen and retries for a
-      // while instead of throwing the tap away.
+      // No connection: the score stays on screen and on this phone, and is
+      // sent as soon as the internet is back (even after reopening the app).
       for (let attempt = 0; !next; attempt += 1) {
         await authGate.ready;
         const authoritative = snapshot.current;
@@ -235,16 +266,18 @@ export default function Home() {
         } catch (caught) {
           const failure = caught as Error & { status?: number };
           const transient = failure.status === 503 || failure.name === 'AbortError' || failure instanceof TypeError || (typeof navigator !== 'undefined' && !navigator.onLine);
-          if (!transient || attempt >= 5) throw caught;
-          await waitForConnection(1000 * 2 ** Math.min(attempt, 3));
+          if (!transient) throw caught;
+          await waitForConnection(Math.min(30000, 1000 * 2 ** attempt));
         }
       }
       pendingMutations.current = pendingMutations.current.filter(item => item.id !== mutation.id);
       setSavingCount(pendingMutations.current.length);
+      savePending();
       applyServerState(next);
     } catch (caught) {
       pendingMutations.current = pendingMutations.current.filter(item => item.id !== mutation.id);
       setSavingCount(pendingMutations.current.length);
+      savePending();
       if (snapshot.current) applyServerState(snapshot.current);
       const failure = caught as Error & { status?: number };
       setError(failure.name !== 'AbortError' ? failure.message : 'Connection lost. That score was not saved.');
@@ -264,9 +297,12 @@ export default function Home() {
     const queued = { ...mutation, id: ++mutationId.current };
     pendingMutations.current = [...pendingMutations.current, queued];
     setSavingCount(pendingMutations.current.length);
+    savePending();
     setState(current => current ? queued.apply(current) : current);
     mutationQueue.current = mutationQueue.current.then(() => persistMutation(queued), () => persistMutation(queued));
   }
+
+  enqueueRef.current = enqueueMutation;
 
   useEffect(() => {
     const newKey = () => Array.from(crypto.getRandomValues(new Uint8Array(32)), value => value.toString(16).padStart(2, '0')).join('');
@@ -286,6 +322,11 @@ export default function Home() {
             snapshot.current = parsed.state;
             setState(parsed.state);
             setReady(true);
+            // Scores tapped offline before the app was closed.
+            const waiting = JSON.parse(localStorage.getItem(pendingKey) || '[]') as StoredMutation[];
+            if (Array.isArray(waiting)) for (const item of waiting) {
+              if (item && typeof item.gameId === 'string' && item.body) enqueueRef.current({ body: item.body, gameId: item.gameId, apply: storedApply(item) });
+            }
           }
         } catch { localStorage.removeItem('yahtzee-state-cache'); }
       }
@@ -303,7 +344,7 @@ export default function Home() {
     // Poll faster while other people are in the game; local-only play does
     // not need polling at all (other tabs are picked up by the storage event).
     const timer = setInterval(() => {
-      if (document.visibilityState !== 'visible') return;
+      if (document.visibilityState !== 'visible' || !navigator.onLine) return;
       const current = snapshot.current;
       const local = current?.mode === 'browser' || (pagesBuild && !googleUserRef.current);
       if (local) return;
@@ -311,7 +352,11 @@ export default function Home() {
       if (Date.now() - lastPoll.current >= every) void api({ action: 'refresh' }, true);
     }, 1000);
     const refreshNow = () => { if (document.visibilityState === 'visible') void api({ action: 'refresh' }, true); };
-    const reconnect = () => { setOffline(false); void api({ action: 'bootstrap' }, true); };
+    const reconnect = () => {
+      setOffline(false);
+      if (pendingMutations.current.length) toast('Back online. Syncing your scores…');
+      void api({ action: 'bootstrap' }, true);
+    };
     const wentOffline = () => setOffline(true);
     const otherTab = (event: StorageEvent) => { if (event.key === browserStoreKey && !googleUserRef.current) void api({ action: 'refresh' }, true); };
     setOffline(!navigator.onLine);
@@ -350,13 +395,16 @@ export default function Home() {
     let resolved = false;
     // If Google's scripts never answer (blocked or very slow network), start
     // in local mode so the app is never stuck on a blank screen.
+    // Offline with a signed-in game on screen: keep showing it and keep
+    // scores waiting on this phone rather than switching to the local sheet.
+    const holdOnlineSheet = () => !navigator.onLine && snapshot.current?.mode === 'online';
     const fallback = setTimeout(() => {
-      if (stopped || resolved || !pagesBuild) return;
+      if (stopped || resolved || !pagesBuild || holdOnlineSheet()) return;
       resolved = true;
       openAuthGate();
       void api({ action: 'bootstrap' });
     }, snapshot.current ? 12000 : 6000);
-    void watchGoogleAccount(async user => {
+    const start = () => void watchGoogleAccount(async user => {
       if (stopped) return;
       const wasSignedIn = !!googleUserRef.current;
       googleUserRef.current = user;
@@ -392,14 +440,17 @@ export default function Home() {
         setAuthBusy(false);
       }
     }).then(stop => { if (stopped) stop(); else unsubscribe = stop; }).catch(caught => {
+      if (stopped || resolved) return;
+      if (holdOnlineSheet()) return; // retried by the online listener below
       setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not load.');
-      if (!resolved && !stopped) {
-        resolved = true;
-        openAuthGate();
-        void api({ action: 'bootstrap' });
-      }
+      resolved = true;
+      openAuthGate();
+      void api({ action: 'bootstrap' });
     });
-    return () => { stopped = true; clearTimeout(fallback); unsubscribe?.(); };
+    const retry = () => { if (!resolved && !stopped && !unsubscribe) start(); };
+    window.addEventListener('online', retry);
+    start();
+    return () => { stopped = true; clearTimeout(fallback); window.removeEventListener('online', retry); unsubscribe?.(); };
   }, [api, importLocalGames, lanMode, openAuthGate, pagesBuild]);
 
   useEffect(() => {
@@ -603,7 +654,7 @@ export default function Home() {
     <Toaster position="top-center" richColors />
     <header className="topbar">
       <button className="brand brand-button" onClick={() => { setView('home'); setHomeTab('home'); }} aria-label="Go to Yahtzee home"><span className="brand-icon"><Dice5 size={28} strokeWidth={1.7} /></span><span>Yahtzee</span></button>
-      <div className="header-right">{offline && <span className="offline-pill" role="status"><WifiOff size={13} />Offline</span>}<button className="profile-btn" onClick={() => { setProfileName(me?.name === 'You' ? '' : me?.name || ''); setModal('profile'); }}><Avatar name={googleUser?.displayName || me?.name || 'You'} photoUrl={profilePhoto} /><span>{headerName}</span>{googleUser ? <ChevronDown size={13} /> : <LogIn size={13} />}</button></div>
+      <div className="header-right">{offline && <span className="offline-pill" role="status" title="Scores are saved on this device and sync when you're back online."><WifiOff size={13} />{savingCount ? `${savingCount} to sync` : 'Offline'}</span>}<button className="profile-btn" onClick={() => { setProfileName(me?.name === 'You' ? '' : me?.name || ''); setModal('profile'); }}><Avatar name={googleUser?.displayName || me?.name || 'You'} photoUrl={profilePhoto} /><span>{headerName}</span>{googleUser ? <ChevronDown size={13} /> : <LogIn size={13} />}</button></div>
     </header>
 
     <main className="shell">

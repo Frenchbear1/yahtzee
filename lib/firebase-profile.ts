@@ -99,13 +99,16 @@ function loadScript(src: string) {
       script.dataset.loaded = 'true';
       resolve();
     };
-    script.onerror = () => reject(new Error('Google sign-in could not load. Check your connection.'));
+    script.onerror = () => {
+      script.remove(); // allow a clean retry once the connection is back
+      reject(new Error('Google sign-in could not load. Check your connection.'));
+    };
     if (!existing) document.head.appendChild(script);
   });
 }
 
 async function firebase() {
-  if (window.firebase) return window.firebase;
+  if (window.firebase?.apps.length) return window.firebase;
   if (!loading) {
     loading = (async () => {
       await loadScript(`https://www.gstatic.com/firebasejs/${sdkVersion}/firebase-app-compat.js`);
@@ -115,6 +118,8 @@ async function firebase() {
       if (!window.firebase.apps.length) window.firebase.initializeApp(firebaseConfig);
       return window.firebase;
     })();
+    // A failed load (for example while offline) is retried on the next call.
+    loading.catch(() => { loading = null; });
   }
   return loading;
 }

@@ -14,7 +14,7 @@ Tap **Invite player** to share a deep link or the six-character room code. Openi
 - **Leaving:** guests can tap **Leave this game** (Home or the invite screen) to go back to their own game. Their unfinished sheet is removed so it never blocks the others. Hosts can remove players from the invite screen; removed players see a short notice.
 - **Names:** a name changed under Profile is kept across sign-ins and devices instead of being reset to the Google name.
 - **Signed-out games:** games played on a device before signing in are copied into the account's history once, the first time you sign in there.
-- **Bad connections:** a score tapped while the connection drops stays on screen and is retried automatically. An *Offline* badge appears in the header while the device has no connection.
+- **Offline:** after one visit with internet, the app opens and works with no connection (a service worker keeps a copy on the device). Signed-out games save on the device as always. Signed-in scores tapped offline are kept on the phone, survive closing the app, and sync automatically when the internet is back. The header badge shows *Offline* or how many scores are waiting to sync.
 
 Firestore rules must be deployed for online rooms:
 
