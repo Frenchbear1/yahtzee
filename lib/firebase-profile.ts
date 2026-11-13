@@ -64,7 +64,7 @@ export type FirebaseCompat = {
     signInWithPopup: (provider: unknown) => Promise<{ user: FirebaseUser }>;
     signOut: () => Promise<void>;
   }) & { GoogleAuthProvider: new () => unknown };
-  firestore: () => FirebaseFirestore;
+  firestore: (() => FirebaseFirestore) & { FieldValue?: { serverTimestamp: () => unknown } };
 };
 
 declare global {
@@ -121,6 +121,12 @@ async function firebase() {
 
 export async function getFirebaseFirestore() {
   return (await firebase()).firestore();
+}
+
+// Presence uses the server clock so a phone with a wrong clock still shows the
+// right people as active. Falls back to the local clock if the SDK lacks it.
+export function serverTimestamp(): unknown {
+  return window.firebase?.firestore.FieldValue?.serverTimestamp() ?? Date.now();
 }
 
 export async function watchGoogleAccount(callback: (user: GoogleAccount | null) => void) {

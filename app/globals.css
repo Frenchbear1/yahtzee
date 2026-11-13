@@ -131,3 +131,21 @@
 @media(max-width:900px){.home-grid{grid-template-columns:1fr}.start-card{min-height:104px}.players-card{min-height:188px}}
 @media(max-width:760px){.home-heading{align-items:center;margin:24px 2px 18px}.home-heading h1{font-size:32px;letter-spacing:-1.1px}.invite-top{font-size:12px;padding:9px 10px}.start-card{min-height:92px;border-radius:19px;padding:18px 20px}.start-row{align-items:center}.start-mark{width:56px;height:56px;border-radius:16px}.players-card{border-radius:19px;padding:20px;min-height:176px}.home-tabs .nav-tabs{min-height:48px!important;border-radius:14px!important}.home-tabs .nav-tabs button{font-size:12px!important;padding:0 8px!important}.home-tabs .nav-tabs button svg{width:15px}.home-grid{gap:13px}}
 @media(max-width:420px){.home-heading{align-items:flex-end}.invite-top{font-size:0;min-width:44px;padding:9px}.invite-top svg{width:18px;height:18px}.start-actions{align-items:flex-start;flex-direction:column;gap:7px}.start-game{width:100%}.start-over{align-self:center}.home-tabs .nav-tabs{gap:3px!important;padding:4px!important}.home-tabs .nav-tabs button{gap:4px;font-size:11px!important;padding:0 5px!important}}
+
+/* Connection, live table, and guest controls */
+.offline-pill{display:inline-flex;align-items:center;gap:5px;margin-right:8px;padding:6px 10px;border-radius:100px;background:#fbefe0;color:#8a5a1f;font-size:12px;font-weight:700}
+.table-strip{display:flex;gap:8px;overflow-x:auto;margin:0 0 16px;padding:2px 2px 6px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.table-strip::-webkit-scrollbar{display:none}
+.table-chip{display:flex;align-items:center;gap:9px;flex-shrink:0;min-width:150px;padding:8px 12px 8px 8px;border:1px solid var(--border);border-radius:14px;background:#fff}
+.table-chip.me{border-color:#b9d0bf;background:#f2f8f1}
+.table-chip>span:nth-child(2){display:grid;flex:1;min-width:0}
+.table-chip strong{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.table-chip small{font-size:11px;color:#839087;margin-top:2px}
+.table-chip b{font-size:18px;font-variant-numeric:tabular-nums;color:#245748}
+.table-chip .presence{width:7px;height:7px;box-shadow:0 0 0 3px #f0f2f1}
+.table-chip .presence.online{box-shadow:0 0 0 3px #e3f0e7}
+.leave-btn{color:#9b493d;margin-top:6px}
+.guest-note{display:grid;gap:2px}
+@media(max-width:760px){.table-strip{margin-bottom:10px}.table-chip{min-width:132px;padding:6px 10px 6px 6px}.table-chip b{font-size:16px}.offline-pill{margin-right:4px;padding:5px 8px;font-size:11px}}
+/* The animated number is a span too; keep it full size (only "pts" is small). */
+.total-number .number-ticker{font-size:inherit;color:inherit;margin:0;letter-spacing:inherit;font-weight:inherit}

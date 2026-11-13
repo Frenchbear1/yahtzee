@@ -1,6 +1,7 @@
 import { gameHasMoves, totals, validScore, type Game, type Room, type Scores, type Sheet, type State } from './game';
 import {
   getFirebaseFirestore,
+  serverTimestamp,
   type FirebaseFirestore,
   type FirebaseUser,
 } from './firebase-profile';
@@ -19,8 +20,21 @@ const roomCollection = 'yahtzeeRooms';
 const codeCollection = 'yahtzeeRoomCodes';
 const maxHistory = 50;
 const maxPlayers = 12;
+// A player counts as "ready" while their app has checked in recently. The app
+// checks in every few seconds while it is open and visible.
+const activeWindow = 30_000;
+const heartbeatEvery = 10_000;
 const currentRoomKey = (userId: string) => `yahtzee-online-room-${userId}`;
-let lastHeartbeat = 0;
+
+let heartbeat = { key: '', at: 0 };
+// Difference between the Firestore server clock and this device's clock.
+let serverOffset = 0;
+// History only changes when the room document changes (new game, deletion,
+// joins), so it is cached and only the live game is re-read on each refresh.
+let historyCache: { owner: string; key: string; games: StoredGame[] } | null = null;
+let roomsCache: { userId: string; rooms: RoomRecord[] } | null = null;
+const preferredNames = new Map<string, string | null>();
+let pendingNotice = '';
 
 function fail(message: string, status = 400): never {
   const error = new Error(message) as Error & { status?: number };
@@ -46,6 +60,23 @@ function cleanPhoto(value: unknown) {
   }
 }
 
+function millis(value: unknown) {
+  if (typeof value === 'number') return value;
+  const timestamp = value as { toMillis?: () => number } | null;
+  return typeof timestamp?.toMillis === 'function' ? timestamp.toMillis() : 0;
+}
+
+function readLocal(key: string) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function writeLocal(key: string, value: string | null) {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch {}
+}
+
 function inviteCode(value?: unknown) {
   if (value !== undefined) return String(value).replace(/[^a-z0-9]/gi, '').toUpperCase();
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -53,13 +84,17 @@ function inviteCode(value?: unknown) {
 }
 
 function profile(user: FirebaseUser, name?: unknown, photoUrl?: unknown): MemberRecord {
-  const fallback = user.displayName || user.email?.split('@')[0] || 'Player';
+  const fallback = preferredNames.get(user.uid) || user.displayName || user.email?.split('@')[0] || 'Player';
   return {
     id: user.uid,
-    name: clean(name ?? user.displayName, fallback),
+    name: clean(name ?? fallback, fallback),
     photo_url: cleanPhoto(photoUrl ?? user.photoURL),
     last_seen: Date.now(),
   };
+}
+
+function memberWrite(member: MemberRecord) {
+  return { id: member.id, name: member.name, photo_url: member.photo_url, last_seen: serverTimestamp() };
 }
 
 function blankSheet(gameId: string, player: Pick<MemberRecord, 'id' | 'name' | 'photo_url'>): Sheet {
@@ -87,6 +122,10 @@ function gameRef(db: FirebaseFirestore, roomId: string, gameId: string) {
   return db.doc(`${roomCollection}/${roomId}/games/${gameId}`);
 }
 
+function profileRef(db: FirebaseFirestore, userId: string) {
+  return db.doc(`users/${userId}/yahtzee/profile`);
+}
+
 function parseRoom(id: string, value: unknown): RoomRecord {
   const data = object(value);
   return {
@@ -107,7 +146,7 @@ function parseMember(id: string, value: unknown): MemberRecord {
     id,
     name: clean(data.name, 'Player'),
     photo_url: cleanPhoto(data.photo_url),
-    last_seen: Number(data.last_seen) || 0,
+    last_seen: millis(data.last_seen),
   };
 }
 
@@ -184,27 +223,35 @@ function publicRoom(room: RoomRecord): Room {
 }
 
 function rememberRoom(userId: string, roomId: string) {
-  localStorage.setItem(currentRoomKey(userId), roomId);
+  writeLocal(currentRoomKey(userId), roomId);
 }
 
 async function membershipRooms(db: FirebaseFirestore, userId: string) {
   const snapshot = await db.collection(roomCollection).where('member_ids', 'array-contains', userId).get();
-  return snapshot.docs.map(document => parseRoom(document.id, document.data())).sort((a, b) => b.created_at - a.created_at);
+  const rooms = snapshot.docs.map(document => parseRoom(document.id, document.data())).sort((a, b) => b.created_at - a.created_at);
+  roomsCache = { userId, rooms };
+  return rooms;
 }
 
 async function findCurrentRoom(db: FirebaseFirestore, userId: string) {
-  const remembered = localStorage.getItem(currentRoomKey(userId));
+  const remembered = readLocal(currentRoomKey(userId));
   if (remembered) {
     const document = await roomRef(db, remembered).get();
     if (document.exists) {
       const room = parseRoom(document.id, document.data());
       if (room.member_ids.includes(userId)) return room;
+      pendingNotice = `You’re no longer in “${room.name}”. You’re back in your own game.`;
+    } else {
+      pendingNotice = 'That game was closed by its host. You’re back in your own game.';
     }
+    writeLocal(currentRoomKey(userId), null);
   }
   const rooms = await membershipRooms(db, userId);
-  if (!rooms.length) return null;
-  rememberRoom(userId, rooms[0].id);
-  return rooms[0];
+  // Prefer the player's own room so leaving or being removed lands them home.
+  const room = rooms.find(item => item.host_id === userId) || rooms[0];
+  if (!room) return null;
+  rememberRoom(userId, room.id);
+  return room;
 }
 
 async function createRoom(db: FirebaseFirestore, user: FirebaseUser, roomName: unknown = 'My game', legacyState?: unknown) {
@@ -230,7 +277,7 @@ async function createRoom(db: FirebaseFirestore, user: FirebaseUser, roomName: u
           member_ids: [user.uid],
         });
         transaction.set(codeReference, { room_id: roomId, host_id: user.uid, created_at: now });
-        transaction.set(memberRef(db, roomId, user.uid), me);
+        transaction.set(memberRef(db, roomId, user.uid), memberWrite(me));
         transaction.set(gameRef(db, roomId, gameId), {
           id: gameId,
           room_id: roomId,
@@ -242,6 +289,7 @@ async function createRoom(db: FirebaseFirestore, user: FirebaseUser, roomName: u
         for (const migrated of migratedGames) transaction.set(gameRef(db, roomId, migrated.id), migrated);
       });
       rememberRoom(user.uid, roomId);
+      roomsCache = null;
       return roomId;
     } catch (error) {
       if ((error as Error & { status?: number }).status !== 409) throw error;
@@ -268,6 +316,12 @@ async function currentGames(db: FirebaseFirestore, roomId: string) {
   return snapshot.docs.map(document => parseStoredGame(document.id, document.data()));
 }
 
+async function readGame(db: FirebaseFirestore, roomId: string, gameId: string) {
+  if (!gameId) return null;
+  const document = await gameRef(db, roomId, gameId).get();
+  return document.exists ? parseStoredGame(document.id, document.data()) : null;
+}
+
 function displayGame(game: StoredGame, members: Map<string, MemberRecord>): Game {
   return {
     id: game.id,
@@ -281,45 +335,111 @@ function displayGame(game: StoredGame, members: Map<string, MemberRecord>): Game
   };
 }
 
-async function snapshot(db: FirebaseFirestore, user: FirebaseUser): Promise<State> {
+function errorCode(error: unknown) {
+  return String((error as { code?: unknown })?.code || '');
+}
+
+// Marks this player as present. A missing member document (for example after
+// an interrupted join) is recreated instead of breaking the whole refresh.
+async function touchMember(db: FirebaseFirestore, roomId: string, user: FirebaseUser) {
+  const reference = memberRef(db, roomId, user.uid);
+  try {
+    await reference.update({ last_seen: serverTimestamp() });
+  } catch (error) {
+    if (!errorCode(error).includes('not-found')) return false;
+    try { await reference.set(memberWrite(profile(user))); } catch { return false; }
+  }
+  return true;
+}
+
+async function snapshot(db: FirebaseFirestore, user: FirebaseUser, fullRooms = false): Promise<State> {
   const room = await ensureRoom(db, user);
-  const now = Date.now();
-  if (now - lastHeartbeat > 8000) {
-    await memberRef(db, room.id, user.uid).update({ last_seen: now });
-    lastHeartbeat = now;
+  const beforeHeartbeat = Date.now();
+  const heartbeatKey = `${user.uid}:${room.id}`;
+  let wroteHeartbeat = false;
+  if (heartbeat.key !== heartbeatKey || beforeHeartbeat - heartbeat.at > heartbeatEvery) {
+    wroteHeartbeat = await touchMember(db, room.id, user);
+    if (wroteHeartbeat) heartbeat = { key: heartbeatKey, at: beforeHeartbeat };
   }
 
-  const [rooms, members, storedGames] = await Promise.all([
-    membershipRooms(db, user.uid),
+  const owner = `${user.uid}:${room.id}`;
+  const historyKey = `${room.current_game_id}:${room.updated_at}`;
+  const cacheValid = historyCache?.owner === owner && historyCache.key === historyKey;
+  const needRooms = fullRooms || roomsCache?.userId !== user.uid || !roomsCache.rooms.some(item => item.id === room.id);
+  const [members, liveGame, fullHistory, rooms] = await Promise.all([
     currentMembers(db, room.id),
-    currentGames(db, room.id),
+    cacheValid ? readGame(db, room.id, room.current_game_id) : Promise.resolve(null),
+    cacheValid ? Promise.resolve(null) : currentGames(db, room.id),
+    needRooms ? membershipRooms(db, user.uid) : Promise.resolve(roomsCache!.rooms),
   ]);
+
+  let storedGames: StoredGame[];
+  if (fullHistory) {
+    storedGames = fullHistory;
+    const live = storedGames.some(game => game.id === room.current_game_id) ? null : await readGame(db, room.id, room.current_game_id);
+    if (live) storedGames = [live, ...storedGames];
+  } else if (liveGame) {
+    storedGames = [liveGame, ...historyCache!.games.filter(game => game.id !== liveGame.id)];
+  } else {
+    storedGames = await currentGames(db, room.id);
+  }
+  storedGames.sort((a, b) => b.started_at - a.started_at);
+  historyCache = { owner, key: historyKey, games: storedGames };
+  roomsCache = { userId: user.uid, rooms: rooms.map(item => item.id === room.id ? room : item) };
+
   const memberMap = new Map(members.map(member => [member.id, member]));
+  const mine = memberMap.get(user.uid);
+  if (wroteHeartbeat && mine?.last_seen) {
+    const offset = mine.last_seen - beforeHeartbeat;
+    if (Math.abs(offset) < 86_400_000) serverOffset = offset;
+  }
+
   const games = storedGames.map(game => displayGame(game, memberMap));
   const activeGame = games.find(game => game.id === room.current_game_id) || games[0];
   if (!activeGame) fail('This game is still starting. Please reconnect.', 503);
 
-  const ownedRooms = rooms.filter(item => item.host_id === user.uid);
-  const ownedMembers = await Promise.all(ownedRooms.map(item => currentMembers(db, item.id)));
-  const me = memberMap.get(user.uid) || profile(user);
-  return {
-    me: { id: me.id, name: me.name, photo_url: me.photo_url },
-    room: publicRoom(room),
-    rooms: rooms.map(publicRoom),
-    managedRooms: ownedRooms.map((item, index) => ({
-      ...publicRoom(item),
-      members: ownedMembers[index].map(member => ({ id: member.id, name: member.name, photo_url: member.photo_url })),
-    })),
-    players: members.map(member => ({
+  const now = Date.now() + serverOffset;
+  const me = mine || profile(user);
+  const players = members
+    .filter(member => room.member_ids.includes(member.id))
+    .map(member => ({
       id: member.id,
       name: member.name,
       photo_url: member.photo_url,
-      active: now - member.last_seen < 15000,
-    })),
+      active: member.id === user.uid || now - member.last_seen < activeWindow,
+    }))
+    .sort((a, b) => Number(b.id === user.uid) - Number(a.id === user.uid)
+      || Number(b.id === room.host_id) - Number(a.id === room.host_id)
+      || Number(b.active) - Number(a.active)
+      || a.name.localeCompare(b.name));
+  if (!players.some(player => player.id === user.uid)) players.unshift({ id: me.id, name: me.name, photo_url: me.photo_url, active: true });
+
+  const notice = pendingNotice;
+  pendingNotice = '';
+  return {
+    me: { id: me.id, name: me.name, photo_url: me.photo_url },
+    room: publicRoom(room),
+    rooms: roomsCache.rooms.map(publicRoom),
+    managedRooms: room.host_id === user.uid
+      ? [{ ...publicRoom(room), members: players.map(player => ({ id: player.id, name: player.name, photo_url: player.photo_url })) }]
+      : [],
+    players,
     game: activeGame,
     history: games,
     mode: 'online',
+    ...(notice ? { notice } : {}),
   };
+}
+
+async function loadPreferredName(db: FirebaseFirestore, user: FirebaseUser) {
+  if (preferredNames.has(user.uid)) return;
+  try {
+    const document = await profileRef(db, user.uid).get();
+    const name = document.exists ? object(document.data()).name : null;
+    preferredNames.set(user.uid, typeof name === 'string' && name.trim() ? clean(name, '') : null);
+  } catch {
+    // Try again on the next request instead of forgetting the custom name.
+  }
 }
 
 async function updateProfile(db: FirebaseFirestore, user: FirebaseUser, name: unknown, photoUrl: unknown) {
@@ -327,38 +447,71 @@ async function updateProfile(db: FirebaseFirestore, user: FirebaseUser, name: un
   const next = profile(user, name, photoUrl);
   if (!rooms.length) return;
   const batch = db.batch();
-  for (const room of rooms) batch.set(memberRef(db, room.id, user.uid), next, { merge: true });
+  for (const room of rooms) batch.set(memberRef(db, room.id, user.uid), memberWrite(next), { merge: true });
   await batch.commit();
 }
 
 async function joinRoom(db: FirebaseFirestore, user: FirebaseUser, rawCode: unknown) {
   const code = inviteCode(rawCode);
-  if (!/^[A-HJ-NP-Z2-9]{4,8}$/.test(code)) fail('Enter the invite code.');
+  if (!/^[A-HJ-NP-Z2-9]{4,8}$/.test(code)) fail('That invite code doesn’t look right. Codes use letters and numbers, like K7M2QX.');
   let joinedRoomId = '';
   await db.runTransaction(async transaction => {
     const codeReference = db.doc(`${codeCollection}/${code}`);
     const codeDocument = await transaction.get(codeReference);
-    if (!codeDocument.exists) fail('That game was not found. Check the invite code.', 404);
+    if (!codeDocument.exists) fail('No game uses that code. Check the code and try again.', 404);
     const roomId = String(codeDocument.data()?.room_id || '');
     const roomReference = roomRef(db, roomId);
     const roomDocument = await transaction.get(roomReference);
-    if (!roomDocument.exists) fail('That invite has expired.', 404);
+    if (!roomDocument.exists) fail('That game has been closed by its host.', 404);
     const room = parseRoom(roomDocument.id, roomDocument.data());
-    if (!room.member_ids.includes(user.uid) && room.member_ids.length >= maxPlayers) fail('That game is full.');
-    const currentGameReference = gameRef(db, room.id, room.current_game_id);
-    const me = profile(user);
     const alreadyMember = room.member_ids.includes(user.uid);
-    const memberIds = alreadyMember ? room.member_ids : [...room.member_ids, user.uid];
-    if (!alreadyMember) transaction.update(roomReference, { member_ids: memberIds, updated_at: Date.now() });
-    transaction.set(memberRef(db, room.id, user.uid), me, { merge: true });
-    if (!alreadyMember) transaction.update(currentGameReference, {
-      [`sheets.${user.uid}`]: blankSheet(room.current_game_id, me),
-      ended_at: null,
-      updated_at: Date.now(),
-    });
+    if (!alreadyMember && room.member_ids.length >= maxPlayers) fail(`That game is full (${maxPlayers} players).`);
+    const currentGameReference = gameRef(db, room.id, room.current_game_id);
+    const currentGameDocument = room.current_game_id ? await transaction.get(currentGameReference) : null;
+    const currentGame = currentGameDocument?.exists ? parseStoredGame(currentGameDocument.id, currentGameDocument.data()) : null;
+    const me = profile(user);
+    const now = Date.now();
+    if (!alreadyMember) transaction.update(roomReference, { member_ids: [...room.member_ids, user.uid], updated_at: now });
+    transaction.set(memberRef(db, room.id, user.uid), memberWrite(me), { merge: true });
+    // Join the game in progress. A finished game is left untouched so it
+    // stays finished; the newcomer gets a sheet when the next game starts.
+    if (currentGame && !currentGame.ended_at && !currentGame.sheets[user.uid]) {
+      transaction.update(currentGameReference, {
+        [`sheets.${user.uid}`]: blankSheet(room.current_game_id, me),
+        updated_at: now,
+      });
+    }
     joinedRoomId = room.id;
   });
   rememberRoom(user.uid, joinedRoomId);
+  roomsCache = null;
+}
+
+async function leaveRoom(db: FirebaseFirestore, user: FirebaseUser, room: RoomRecord) {
+  if (room.host_id === user.uid) fail('You host this game, so you can’t leave it.');
+  await db.runTransaction(async transaction => {
+    const reference = roomRef(db, room.id);
+    const document = await transaction.get(reference);
+    if (!document.exists) return;
+    const latest = parseRoom(document.id, document.data());
+    if (!latest.member_ids.includes(user.uid)) return;
+    const currentGameReference = gameRef(db, room.id, latest.current_game_id);
+    const currentGameDocument = latest.current_game_id ? await transaction.get(currentGameReference) : null;
+    const currentGame = currentGameDocument?.exists ? parseStoredGame(currentGameDocument.id, currentGameDocument.data()) : null;
+    const now = Date.now();
+    transaction.update(reference, { member_ids: latest.member_ids.filter(id => id !== user.uid), updated_at: now });
+    transaction.delete(memberRef(db, room.id, user.uid));
+    // An unfinished sheet would keep everyone else's game open forever.
+    if (currentGame?.sheets[user.uid] && !currentGame.ended_at && !currentGame.sheets[user.uid].completed_at) {
+      const sheets = { ...currentGame.sheets };
+      delete sheets[user.uid];
+      const remaining = Object.values(sheets);
+      const endedAt = remaining.length > 0 && remaining.every(sheet => sheet.completed_at) ? now : null;
+      transaction.update(currentGameReference, { sheets, ended_at: endedAt, updated_at: now });
+    }
+  });
+  writeLocal(currentRoomKey(user.uid), null);
+  roomsCache = null;
 }
 
 async function mutateScore(db: FirebaseFirestore, user: FirebaseUser, room: RoomRecord, body: Record<string, unknown>) {
@@ -373,7 +526,7 @@ async function mutateScore(db: FirebaseFirestore, user: FirebaseUser, room: Room
     if (!document.exists) fail('This score sheet is not available.', 404);
     const game = parseStoredGame(document.id, document.data());
     const playerSheet = game.sheets[user.uid];
-    if (!playerSheet) fail('Join this game before adding a score.', 403);
+    if (!playerSheet) fail('You’ll get a score sheet when the next game starts.', 403);
     if (body.revision !== playerSheet.revision) fail('Another screen changed this score. Please try again.', 409);
 
     const scores = { ...playerSheet.scores };
@@ -396,7 +549,7 @@ async function mutateScore(db: FirebaseFirestore, user: FirebaseUser, room: Room
       bonus = nextBonus;
     }
 
-    const completedAt = totals(scores, bonus).filled === 13 ? Date.now() : null;
+    const completedAt = totals(scores, bonus).filled === 13 ? playerSheet.completed_at || Date.now() : null;
     const sheets = {
       ...game.sheets,
       [user.uid]: { ...playerSheet, scores, bonus, revision: playerSheet.revision + 1, completed_at: completedAt },
@@ -406,13 +559,11 @@ async function mutateScore(db: FirebaseFirestore, user: FirebaseUser, room: Room
   });
 }
 
-async function gameSheets(db: FirebaseFirestore, room: RoomRecord, gameId: string) {
-  const members = await currentMembers(db, room.id);
-  const byId = new Map(members.map(member => [member.id, member]));
+function sheetsFor(memberIds: string[], members: Map<string, MemberRecord>, gameId: string) {
   const sheets: Record<string, Sheet> = {};
-  for (const playerId of room.member_ids) {
-    const member = byId.get(playerId);
-    if (member) sheets[playerId] = blankSheet(gameId, member);
+  for (const playerId of memberIds) {
+    const member = members.get(playerId) || { id: playerId, name: 'Player', photo_url: null, last_seen: 0 };
+    sheets[playerId] = blankSheet(gameId, member);
   }
   return sheets;
 }
@@ -420,7 +571,7 @@ async function gameSheets(db: FirebaseFirestore, room: RoomRecord, gameId: strin
 async function newGame(db: FirebaseFirestore, user: FirebaseUser, room: RoomRecord, body: Record<string, unknown>) {
   if (room.host_id !== user.uid) fail('The game host starts the next game.', 403);
   const gameId = crypto.randomUUID();
-  const sheets = await gameSheets(db, room, gameId);
+  const members = new Map((await currentMembers(db, room.id)).map(member => [member.id, member]));
   const now = Date.now();
   await db.runTransaction(async transaction => {
     const roomReference = roomRef(db, room.id);
@@ -430,16 +581,15 @@ async function newGame(db: FirebaseFirestore, user: FirebaseUser, room: RoomReco
     if (latestRoom.current_game_id !== String(body.gameId || '')) fail('A new game has already started. Your game is refreshed.', 409);
     const oldReference = gameRef(db, room.id, latestRoom.current_game_id);
     const oldDocument = await transaction.get(oldReference);
-    if (!oldDocument.exists) fail('That game was not found.', 404);
-    const oldGame = parseStoredGame(oldDocument.id, oldDocument.data());
-    if (!oldGame.ended_at && !body.confirm) fail('There are unfinished score sheets. Confirm to start a fresh game.');
+    const oldGame = oldDocument.exists ? parseStoredGame(oldDocument.id, oldDocument.data()) : null;
+    if (oldGame && !oldGame.ended_at && !body.confirm) fail('There are unfinished score sheets. Confirm to start a fresh game.');
     transaction.set(gameRef(db, room.id, gameId), {
       id: gameId,
       room_id: room.id,
       started_at: now,
       ended_at: null,
       updated_at: now,
-      sheets,
+      sheets: sheetsFor(latestRoom.member_ids, members, gameId),
     });
     transaction.update(roomReference, { current_game_id: gameId, updated_at: now });
   });
@@ -449,7 +599,7 @@ async function deleteGame(db: FirebaseFirestore, user: FirebaseUser, room: RoomR
   if (room.host_id !== user.uid) fail('Only the game owner can delete game history.', 403);
   const requestedGameId = String(body.gameId || '');
   const replacementId = crypto.randomUUID();
-  const sheets = await gameSheets(db, room, replacementId);
+  const members = new Map((await currentMembers(db, room.id)).map(member => [member.id, member]));
   const now = Date.now();
   await db.runTransaction(async transaction => {
     const roomReference = roomRef(db, room.id);
@@ -458,7 +608,7 @@ async function deleteGame(db: FirebaseFirestore, user: FirebaseUser, room: RoomR
     const latestRoom = parseRoom(roomDocument.id, roomDocument.data());
     const requestedReference = gameRef(db, room.id, requestedGameId);
     const requestedDocument = await transaction.get(requestedReference);
-    if (!requestedDocument.exists) fail('That game was not found.', 404);
+    if (!requestedDocument.exists) fail('That game was already deleted.', 404);
     transaction.delete(requestedReference);
     if (latestRoom.current_game_id === requestedGameId) {
       transaction.set(gameRef(db, room.id, replacementId), {
@@ -467,9 +617,12 @@ async function deleteGame(db: FirebaseFirestore, user: FirebaseUser, room: RoomR
         started_at: now,
         ended_at: null,
         updated_at: now,
-        sheets,
+        sheets: sheetsFor(latestRoom.member_ids, members, replacementId),
       });
       transaction.update(roomReference, { current_game_id: replacementId, updated_at: now });
+    } else {
+      // Bumping updated_at tells every player's app to reload the history.
+      transaction.update(roomReference, { updated_at: Math.max(now, latestRoom.updated_at + 1) });
     }
   });
 }
@@ -490,31 +643,65 @@ async function deleteRoom(db: FirebaseFirestore, user: FirebaseUser, roomId: str
   batch.delete(db.doc(`${codeCollection}/${room.code}`));
   batch.delete(reference);
   await batch.commit();
-  localStorage.removeItem(currentRoomKey(user.uid));
+  writeLocal(currentRoomKey(user.uid), null);
+  roomsCache = null;
+}
+
+// Copies games played on this device while signed out into the player's own
+// online room, so nothing disappears after signing in. Existing games are kept.
+async function importLocalGames(db: FirebaseFirestore, user: FirebaseUser, room: RoomRecord, data: unknown) {
+  if (room.host_id !== user.uid) return 0;
+  const games = legacyGames(data, user, room.id);
+  if (!games.length) return 0;
+  const existing = await Promise.all(games.map(game => gameRef(db, room.id, game.id).get()));
+  const missing = games.filter((_, index) => !existing[index].exists);
+  if (!missing.length) return 0;
+  const batch = db.batch();
+  for (const game of missing) batch.set(gameRef(db, room.id, game.id), game);
+  batch.update(roomRef(db, room.id), { updated_at: Math.max(Date.now(), room.updated_at + 1) });
+  await batch.commit();
+  return missing.length;
 }
 
 function friendlyFirebaseError(error: unknown): never {
   const known = error as Error & { status?: number; code?: string };
   if (known.status) throw known;
-  if (known.code?.includes('permission-denied')) fail('Online games need a signed-in Google account. Sign in and try again.', 403);
-  if (known.code?.includes('unavailable')) fail('Online games are temporarily unreachable. Check your connection and try again.', 503);
+  const code = errorCode(error);
+  if (code.includes('permission-denied')) fail('That action isn’t allowed for your account. Refresh and try again.', 403);
+  if (code.includes('unauthenticated')) fail('Google sign-in expired. Sign in again to keep playing online.', 401);
+  if (code.includes('resource-exhausted')) fail('Online play is busy right now. Try again in a few minutes.', 503);
+  if (code.includes('unavailable') || code.includes('deadline-exceeded') || (typeof navigator !== 'undefined' && !navigator.onLine)) {
+    fail('You’re offline. Check your connection and try again.', 503);
+  }
+  if (code.includes('aborted')) fail('Someone else saved at the same moment. Please try again.', 409);
   throw known;
 }
 
 export async function firebaseGameRequest(body: Record<string, unknown>, user: FirebaseUser): Promise<State> {
   try {
     const db = await getFirebaseFirestore();
+    await loadPreferredName(db, user);
     const action = String(body.action || '');
+
+    if (action === 'refresh') return await snapshot(db, user);
+    if (action === 'bootstrap') {
+      await ensureRoom(db, user, body.legacyState);
+      return await snapshot(db, user, true);
+    }
     if (action === 'join-room') {
       await joinRoom(db, user, body.code);
-      return await snapshot(db, user);
+      return await snapshot(db, user, true);
     }
-    let room = await ensureRoom(db, user, body.legacyState);
 
+    const room = await ensureRoom(db, user, body.legacyState);
     if (action === 'rename') {
-      await updateProfile(db, user, body.name, user.photoURL);
+      const name = clean(body.name, '');
+      if (!name) fail('Enter a name.');
+      await profileRef(db, user.uid).set({ name, updatedAt: Date.now() });
+      preferredNames.set(user.uid, name);
+      await updateProfile(db, user, name, user.photoURL);
     } else if (action === 'sync-profile') {
-      await updateProfile(db, user, body.name, body.photoUrl);
+      await updateProfile(db, user, preferredNames.get(user.uid) || body.name, body.photoUrl);
     } else if (action === 'create-room') {
       await createRoom(db, user, body.name);
     } else if (action === 'rename-room') {
@@ -526,6 +713,11 @@ export async function firebaseGameRequest(body: Record<string, unknown>, user: F
       const next = await roomRef(db, String(body.roomId || '')).get();
       if (!next.exists || !parseRoom(next.id, next.data()).member_ids.includes(user.uid)) fail('That game was not found.', 404);
       rememberRoom(user.uid, next.id);
+    } else if (action === 'leave-room') {
+      await leaveRoom(db, user, room);
+    } else if (action === 'import-local') {
+      const count = await importLocalGames(db, user, room, body.data);
+      if (count) pendingNotice = `Added ${count} ${count === 1 ? 'game' : 'games'} from this device to your history.`;
     } else if (action === 'remove-member') {
       const playerId = String(body.playerId || '');
       if (room.host_id !== user.uid || room.id !== String(body.roomId || '')) fail('Only the game owner can manage its players.', 403);
@@ -554,16 +746,16 @@ export async function firebaseGameRequest(body: Record<string, unknown>, user: F
       });
     } else if (action === 'score' || action === 'bonus') {
       await mutateScore(db, user, room, body);
+      return await snapshot(db, user);
     } else if (action === 'new-game') {
       await newGame(db, user, room, body);
     } else if (action === 'delete-game') {
       await deleteGame(db, user, room, body);
-    } else if (!['bootstrap', 'refresh'].includes(action)) {
+    } else {
       fail('Unknown action.');
     }
 
-    room = await ensureRoom(db, user);
-    return await snapshot(db, user);
+    return await snapshot(db, user, true);
   } catch (error) {
     friendlyFirebaseError(error);
   }

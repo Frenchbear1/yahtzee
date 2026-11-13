@@ -112,6 +112,18 @@ service cloud.firestore {
           ]);
       }
 
+      // Any player except the host may leave a room on their own.
+      function selfLeave() {
+        return request.auth.uid in resource.data.member_ids
+          && request.auth.uid != resource.data.host_id
+          && !(request.auth.uid in request.resource.data.member_ids)
+          && resource.data.member_ids.hasAll(request.resource.data.member_ids)
+          && request.resource.data.member_ids.size() == resource.data.member_ids.size() - 1
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'updated_at', 'member_ids'
+          ]);
+      }
+
       // A signed-in invite recipient learns this unguessable room id from the
       // short-code document, then reads metadata before atomically joining.
       allow get: if signedIn();
@@ -120,7 +132,7 @@ service cloud.firestore {
         && validRoom()
         && request.resource.data.host_id == request.auth.uid
         && request.resource.data.member_ids == [request.auth.uid];
-      allow update: if signedIn() && validRoom() && (hostUpdate() || selfJoin());
+      allow update: if signedIn() && validRoom() && (hostUpdate() || selfJoin() || selfLeave());
       allow delete: if signedIn() && resource.data.host_id == request.auth.uid;
 
       match /members/{memberId} {

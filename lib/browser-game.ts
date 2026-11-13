@@ -69,19 +69,72 @@ function createStore(): BrowserStore {
   };
 }
 
+// Used when the browser blocks storage (some private modes). Games still work
+// for this visit instead of the app failing to load.
+let memoryStore: BrowserStore | null = null;
+export let browserStorageAvailable = true;
+
+// Fixes a damaged save instead of throwing all games away.
+function repairStore(parsed: BrowserStore) {
+  parsed.rooms = Array.isArray(parsed.rooms) ? parsed.rooms.filter(room => room && typeof room.id === 'string') : [];
+  parsed.games = Array.isArray(parsed.games) ? parsed.games.filter(game => game && typeof game.id === 'string' && Array.isArray(game.sheets)) : [];
+  parsed.me.name = clean(parsed.me.name, 'You');
+  if (!parsed.rooms.length) {
+    const now = Date.now();
+    parsed.rooms.push({ id: parsed.currentRoom || id(), name: 'My game', code: code(), host_id: parsed.me.id, created_at: now });
+  }
+  if (!parsed.rooms.some(room => room.id === parsed.currentRoom)) parsed.currentRoom = parsed.rooms[0].id;
+  for (const room of parsed.rooms) {
+    room.host_id = parsed.me.id;
+    if (!parsed.games.some(game => game.room_id === room.id)) {
+      const gameId = id();
+      parsed.games.push({ id: gameId, room_id: room.id, started_at: Date.now(), ended_at: null, sheets: [sheet(gameId, parsed.me.id, parsed.me.name)] });
+    }
+  }
+  for (const game of parsed.games) {
+    if (!game.sheets.some(item => item.player_id === parsed.me.id)) game.sheets.push(sheet(game.id, parsed.me.id, parsed.me.name));
+    for (const item of game.sheets) {
+      item.scores = item.scores && typeof item.scores === 'object' ? item.scores : {};
+      item.bonus = Number(item.bonus) || 0;
+      item.revision = Number(item.revision) || 0;
+    }
+  }
+  return parsed;
+}
+
 function loadStore() {
+  if (memoryStore) return memoryStore;
+  let raw: string | null = null;
   try {
-    const parsed = JSON.parse(localStorage.getItem(storageKey) || 'null') as BrowserStore | null;
-    if (parsed?.version === 1 && parsed.me?.id && parsed.rooms?.length && parsed.games?.length) return parsed;
-  } catch {}
+    raw = localStorage.getItem(storageKey);
+  } catch {
+    browserStorageAvailable = false;
+    memoryStore = createStore();
+    return memoryStore;
+  }
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as BrowserStore | null;
+      if (parsed?.version === 1 && parsed.me?.id) return repairStore(parsed);
+    } catch {}
+    // Keep unreadable data so it can be recovered rather than overwriting it.
+    try { localStorage.setItem(`${storageKey}-backup-${Date.now()}`, raw); } catch {}
+  }
   const store = createStore();
   saveStore(store);
   return store;
 }
 
 function saveStore(store: BrowserStore) {
-  localStorage.setItem(storageKey, JSON.stringify(store));
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(store));
+  } catch {
+    browserStorageAvailable = false;
+    memoryStore = store;
+  }
 }
+
+export const browserStoreKey = storageKey;
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import {
   ArrowRight, ArrowUpRight, Check, ChevronDown, Dice1, Dice2, Dice3, Dice4, Dice5, Dice6,
   Cloud, Dices, Flag, History, Home as HomeIcon, House, Layers, LogIn, LogOut,
-  Play, Plus, Share2, Sparkles, Star, Trash2, TrendingUp, Trophy, UserPlus, X,
+  Play, Plus, Share2, Sparkles, Star, Trash2, TrendingUp, Trophy, UserPlus, WifiOff, X,
 } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
@@ -13,7 +13,7 @@ import { Progress } from '@/components/ui/progress';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Toaster, toast } from 'sonner';
 import { bonusPlans, categories, gameHasMoves, leaderboard, totals, type Category, type Game, type Sheet, type State } from '@/lib/game';
-import { browserGameRequest } from '@/lib/browser-game';
+import { browserGameRequest, browserStorageAvailable, browserStoreKey, exportBrowserCloudData } from '@/lib/browser-game';
 import { firebaseGameRequest } from '@/lib/firebase-game';
 import { getGoogleIdToken, loadGoogleScores, signInWithGoogle, signOutGoogle, watchGoogleAccount, type GoogleAccount } from '@/lib/firebase-profile';
 
@@ -86,6 +86,8 @@ export default function Home() {
   const [savingCount, setSavingCount] = useState(0);
   const [googleUser, setGoogleUser] = useState<GoogleAccount | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
+  const [offline, setOffline] = useState(false);
+  const [leaveOpen, setLeaveOpen] = useState(false);
   const token = useRef('');
   const googleUserRef = useRef<GoogleAccount | null>(null);
   const snapshot = useRef<State | null>(null);
@@ -96,6 +98,20 @@ export default function Home() {
   const mutationId = useRef(0);
   const initialViewChosen = useRef(false);
   const celebrateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // On the GitHub Pages build nothing loads until Google sign-in has decided
+  // whether this is a local or an online player. That avoids briefly showing
+  // (or saving to) the wrong score sheet.
+  const authReady = useRef(!pagesBuild);
+  const [authGate] = useState(() => {
+    let open = () => {};
+    const ready = pagesBuild ? new Promise<void>(resolve => { open = resolve; }) : Promise.resolve();
+    return { ready, open };
+  });
+  const lastPoll = useRef(0);
+  const openAuthGate = useCallback(() => {
+    authReady.current = true;
+    authGate.open();
+  }, [authGate]);
 
   const me = state?.me;
   const game = state?.game;
@@ -124,6 +140,7 @@ export default function Home() {
 
   const requestState = useCallback(async (data: Record<string, unknown>, playerToken = token.current): Promise<State> => {
     if (typeof window !== 'undefined' && window.__YAHTZEE_PAGES__) {
+      await authGate.ready;
       const user = googleUserRef.current;
       return user ? firebaseGameRequest(data, user) : browserGameRequest(data);
     }
@@ -148,9 +165,11 @@ export default function Home() {
     } finally {
       clearTimeout(timeout);
     }
-  }, []);
+  }, [authGate]);
 
-  const applyServerState = useCallback((next: State) => {
+  const applyServerState = useCallback((incoming: State) => {
+    const { notice, ...next } = incoming;
+    if (notice) toast(notice);
     const current = snapshot.current;
     if (current?.game?.id === next.game?.id) {
       const currentRevision = current.game.sheets.find(item => item.player_id === current.me.id)?.revision ?? -1;
@@ -168,7 +187,8 @@ export default function Home() {
   const api = useCallback((data: Record<string, unknown>, quiet = false): Promise<State | null> => {
     if (!token.current) return Promise.resolve(null);
     const run = async () => {
-      if (quiet && (busyRef.current || pendingMutations.current.length)) return null;
+      if (quiet && (!authReady.current || busyRef.current || pendingMutations.current.length)) return null;
+      if (quiet) lastPoll.current = Date.now();
       if (!quiet) { busyRef.current = true; setBusy(true); }
       try {
         const playerToken = token.current;
@@ -200,12 +220,25 @@ export default function Home() {
 
   async function persistMutation(mutation: OptimisticMutation) {
     try {
-      const authoritative = snapshot.current;
-      if (!authoritative) throw new Error('Your score sheet needs to reconnect.');
-      const authoritativeGame = authoritative?.history.find(item => item.id === mutation.gameId);
-      const authoritativeSheet = authoritativeGame?.sheets.find(item => item.player_id === authoritative.me.id);
-      if (!authoritativeSheet) throw new Error('Your score sheet needs to reconnect.');
-      const next = await requestState({ ...mutation.body, gameId: mutation.gameId, revision: authoritativeSheet.revision });
+      let next: State | null = null;
+      // A dropped connection keeps the score on screen and retries for a
+      // while instead of throwing the tap away.
+      for (let attempt = 0; !next; attempt += 1) {
+        await authGate.ready;
+        const authoritative = snapshot.current;
+        if (!authoritative) throw new Error('Your score sheet needs to reconnect.');
+        const authoritativeGame = authoritative?.history.find(item => item.id === mutation.gameId);
+        const authoritativeSheet = authoritativeGame?.sheets.find(item => item.player_id === authoritative.me.id);
+        if (!authoritativeSheet) throw new Error('Your score sheet needs to reconnect.');
+        try {
+          next = await requestState({ ...mutation.body, gameId: mutation.gameId, revision: authoritativeSheet.revision });
+        } catch (caught) {
+          const failure = caught as Error & { status?: number };
+          const transient = failure.status === 503 || failure.name === 'AbortError' || failure instanceof TypeError || (typeof navigator !== 'undefined' && !navigator.onLine);
+          if (!transient || attempt >= 5) throw caught;
+          await waitForConnection(1000 * 2 ** Math.min(attempt, 3));
+        }
+      }
       pendingMutations.current = pendingMutations.current.filter(item => item.id !== mutation.id);
       setSavingCount(pendingMutations.current.length);
       applyServerState(next);
@@ -219,6 +252,14 @@ export default function Home() {
     }
   }
 
+  function waitForConnection(delay: number) {
+    return new Promise<void>(resolve => {
+      const done = () => { clearTimeout(timer); window.removeEventListener('online', done); resolve(); };
+      const timer = setTimeout(done, navigator.onLine ? delay : 30000);
+      window.addEventListener('online', done);
+    });
+  }
+
   function enqueueMutation(mutation: Omit<OptimisticMutation, 'id'>) {
     const queued = { ...mutation, id: ++mutationId.current };
     pendingMutations.current = [...pendingMutations.current, queued];
@@ -228,10 +269,12 @@ export default function Home() {
   }
 
   useEffect(() => {
+    const newKey = () => Array.from(crypto.getRandomValues(new Uint8Array(32)), value => value.toString(16).padStart(2, '0')).join('');
+    let storageWorks = true;
     try {
       let saved = localStorage.getItem('yahtzee-player-key');
       if (!saved) {
-        saved = Array.from(crypto.getRandomValues(new Uint8Array(32)), value => value.toString(16).padStart(2, '0')).join('');
+        saved = newKey();
         localStorage.setItem('yahtzee-player-key', saved);
       }
       token.current = saved;
@@ -247,60 +290,117 @@ export default function Home() {
         } catch { localStorage.removeItem('yahtzee-state-cache'); }
       }
     } catch {
-      setError('Allow browser storage so this device can remember your player.');
-      setReady(true);
-      return;
+      // Storage is blocked (some private browsing modes). Keep playing for
+      // this visit instead of refusing to start.
+      storageWorks = false;
+      token.current = newKey();
     }
+    if (!storageWorks || !browserStorageAvailable) toast('This browser is blocking storage, so games won’t be kept after you close it. Sign in with Google to save them.', { duration: 8000 });
     const tableCode = new URLSearchParams(window.location.search).get('table');
-    if (tableCode) { setJoinCode(tableCode); setModal('invite'); }
-    void api({ action: 'bootstrap' });
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') void api({ action: 'refresh' }, true); }, 4000);
-    const reconnect = () => void api({ action: 'bootstrap' }, true);
+    if (tableCode) { setJoinCode(tableCode.replace(/[^a-z0-9]/gi, '').toUpperCase()); setModal('invite'); }
+    if (!pagesBuild) void api({ action: 'bootstrap' });
+
+    // Poll faster while other people are in the game; local-only play does
+    // not need polling at all (other tabs are picked up by the storage event).
+    const timer = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      const current = snapshot.current;
+      const local = current?.mode === 'browser' || (pagesBuild && !googleUserRef.current);
+      if (local) return;
+      const every = (current?.players.length || 0) > 1 ? 4000 : 9000;
+      if (Date.now() - lastPoll.current >= every) void api({ action: 'refresh' }, true);
+    }, 1000);
+    const refreshNow = () => { if (document.visibilityState === 'visible') void api({ action: 'refresh' }, true); };
+    const reconnect = () => { setOffline(false); void api({ action: 'bootstrap' }, true); };
+    const wentOffline = () => setOffline(true);
+    const otherTab = (event: StorageEvent) => { if (event.key === browserStoreKey && !googleUserRef.current) void api({ action: 'refresh' }, true); };
+    setOffline(!navigator.onLine);
+    document.addEventListener('visibilitychange', refreshNow);
+    window.addEventListener('focus', refreshNow);
     window.addEventListener('online', reconnect);
+    window.addEventListener('offline', wentOffline);
+    window.addEventListener('storage', otherTab);
     return () => {
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', refreshNow);
+      window.removeEventListener('focus', refreshNow);
       window.removeEventListener('online', reconnect);
+      window.removeEventListener('offline', wentOffline);
+      window.removeEventListener('storage', otherTab);
       if (celebrateTimer.current) clearTimeout(celebrateTimer.current);
     };
+  }, [api, pagesBuild]);
+
+  const importLocalGames = useCallback(async (uid: string) => {
+    const current = snapshot.current;
+    if (!current || current.mode !== 'online' || current.room.host_id !== current.me.id) return;
+    const key = `yahtzee-imported-${uid}`;
+    let done: string[] = [];
+    try { done = JSON.parse(localStorage.getItem(key) || '[]') as string[]; } catch {}
+    const games = exportBrowserCloudData().games.filter(item => !done.includes(item.id)).slice(0, 40);
+    if (!games.length) return;
+    const next = await api({ action: 'import-local', data: { version: 1, games } }, true);
+    if (next) try { localStorage.setItem(key, JSON.stringify([...done, ...games.map(item => item.id)].slice(-500))); } catch {}
   }, [api]);
 
   useEffect(() => {
     if (lanMode) return;
     let stopped = false;
     let unsubscribe: (() => void) | undefined;
+    let resolved = false;
+    // If Google's scripts never answer (blocked or very slow network), start
+    // in local mode so the app is never stuck on a blank screen.
+    const fallback = setTimeout(() => {
+      if (stopped || resolved || !pagesBuild) return;
+      resolved = true;
+      openAuthGate();
+      void api({ action: 'bootstrap' });
+    }, snapshot.current ? 12000 : 6000);
     void watchGoogleAccount(async user => {
       if (stopped) return;
+      const wasSignedIn = !!googleUserRef.current;
       googleUserRef.current = user;
       setGoogleUser(user);
+      const firstAnswer = !resolved;
+      resolved = true;
+      openAuthGate();
       if (!user) {
         setAccountError('');
-        if (pagesBuild) await api({ action: 'bootstrap' });
+        if (pagesBuild && (firstAnswer || wasSignedIn || snapshot.current?.mode === 'online')) await api({ action: 'bootstrap' });
         return;
       }
       try {
         setAuthBusy(true);
         await getGoogleIdToken(user);
         const linkedCode = pagesBuild ? new URLSearchParams(window.location.search).get('table') : null;
-        const legacyState = pagesBuild && !linkedCode ? await loadGoogleScores(user.uid) : null;
-        const next = await api(linkedCode ? { action: 'join-room', code: linkedCode } : { action: 'bootstrap', legacyState });
-        if (next) await api({ action: 'sync-profile', name: user.displayName || 'Player', photoUrl: user.photoURL });
-        if (next && linkedCode) {
+        const legacyState = pagesBuild && !linkedCode ? await loadGoogleScores(user.uid).catch(() => null) : null;
+        let next = await api(linkedCode ? { action: 'join-room', code: linkedCode } : { action: 'bootstrap', legacyState });
+        if (linkedCode) {
           const url = new URL(window.location.href);
           url.searchParams.delete('table');
           window.history.replaceState({}, '', url);
-          setJoinCode('');
-          setModal(null);
-          toast.success('You joined the game.');
+          if (next) { setJoinCode(''); setModal(null); toast.success('You joined the game.'); }
+          // A bad or expired link still needs to land the player in a game.
+          else next = await api({ action: 'bootstrap' });
         }
+        if (next) await api({ action: 'sync-profile', name: user.displayName || 'Player', photoUrl: user.photoURL });
+        if (next && pagesBuild) await importLocalGames(user.uid);
         setAccountError('');
       } catch (caught) {
         setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not finish.');
       } finally {
         setAuthBusy(false);
       }
-    }).then(stop => { unsubscribe = stop; }).catch(caught => setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not load.'));
-    return () => { stopped = true; unsubscribe?.(); };
-  }, [api, lanMode, pagesBuild]);
+    }).then(stop => { if (stopped) stop(); else unsubscribe = stop; }).catch(caught => {
+      setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not load.');
+      if (!resolved && !stopped) {
+        resolved = true;
+        openAuthGate();
+        void api({ action: 'bootstrap' });
+      }
+    });
+    return () => { stopped = true; clearTimeout(fallback); unsubscribe?.(); };
+  }, [api, importLocalGames, lanMode, openAuthGate, pagesBuild]);
 
   useEffect(() => {
     if (modal !== 'finish') return;
@@ -378,6 +478,7 @@ export default function Home() {
 
   function openCurrentGame() {
     if (!game || !sheet) return;
+    if (waitingForPlayers) { if (host) setModal('new'); return; }
     if (game.ended_at || score.remaining === 0) { if (host) void beginNewGame(); return; }
     setView('game');
   }
@@ -423,6 +524,13 @@ export default function Home() {
     if (score.upper >= 63) { toast.success('Upper bonus secured'); return; }
     if (bonusNeeded > maxRemainingUpper || !plans.length) { toast('The upper bonus is no longer reachable on this sheet.'); return; }
     setBonusPlanIndex(index => index < 0 ? 0 : index + 1 >= plans.length ? -1 : index + 1);
+  }
+
+  async function leaveGame() {
+    const roomName = state?.room.name;
+    const next = await api({ action: 'leave-room' });
+    setLeaveOpen(false);
+    if (next) { setModal(null); setView('home'); setHomeTab('home'); toast.success(roomName ? `You left “${roomName}”.` : 'You left the game.'); }
   }
 
   async function retryGoogleSync() {
@@ -472,6 +580,12 @@ export default function Home() {
   const activePlayers = state?.players.filter(player => player.active) || [];
   const gameInProgress = !!game && !!sheet && !game.ended_at && score.filled > 0 && score.remaining > 0;
   const waitingForPlayers = !!sheet?.completed_at && !game?.ended_at;
+  const hostPlayer = state?.players.find(player => player.id === state.room.host_id);
+  const hostName = hostPlayer && hostPlayer.id !== me?.id ? firstName(hostPlayer.name) : 'the host';
+  // A guest whose game is over (or who joined after it ended) waits for the
+  // host to start the next one.
+  const waitingForHost = !host && !!state && !!game && (!sheet || !!game.ended_at);
+  const onlineRoom = state?.mode === 'online';
 
   function row(chosen: Category, index: number) {
     const value = sheet?.scores[chosen.id], filled = value !== null && value !== undefined, Icon = icons[index];
@@ -489,14 +603,23 @@ export default function Home() {
     <Toaster position="top-center" richColors />
     <header className="topbar">
       <button className="brand brand-button" onClick={() => { setView('home'); setHomeTab('home'); }} aria-label="Go to Yahtzee home"><span className="brand-icon"><Dice5 size={28} strokeWidth={1.7} /></span><span>Yahtzee</span></button>
-      <div className="header-right"><button className="profile-btn" onClick={() => { setProfileName(me?.name === 'You' ? '' : me?.name || ''); setModal('profile'); }}><Avatar name={googleUser?.displayName || me?.name || 'You'} photoUrl={profilePhoto} /><span>{headerName}</span>{googleUser ? <ChevronDown size={13} /> : <LogIn size={13} />}</button></div>
+      <div className="header-right">{offline && <span className="offline-pill" role="status"><WifiOff size={13} />Offline</span>}<button className="profile-btn" onClick={() => { setProfileName(me?.name === 'You' ? '' : me?.name || ''); setModal('profile'); }}><Avatar name={googleUser?.displayName || me?.name || 'You'} photoUrl={profilePhoto} /><span>{headerName}</span>{googleUser ? <ChevronDown size={13} /> : <LogIn size={13} />}</button></div>
     </header>
 
     <main className="shell">
       {error && <div role="alert" className="inline-error sync-banner">{error} <button className="text-btn" onClick={() => void api({ action: 'bootstrap' })}>Reconnect</button></div>}
 
       {view === 'game' ? <>
-          {state && !sheet && <p className="inline-error" style={{ marginBottom: 16 }}>This game is finished. Tap the Yahtzee logo to return home.</p>}
+          {state && !sheet && <p className="inline-error" style={{ marginBottom: 16 }}>{host ? 'This game is finished. Tap the Yahtzee logo to return home.' : `You’ll get a score sheet when ${hostName} starts the next game.`}</p>}
+          {game && game.sheets.length > 1 && <div className="table-strip" aria-label="Live scores">{live.map(item => {
+            const itemTotals = totals(item.scores, item.bonus), player = state?.players.find(entry => entry.id === item.player_id), mine = item.player_id === me?.id;
+            return <div className={`table-chip ${mine ? 'me' : ''}`} key={item.player_id}>
+              <Avatar name={item.name} photoUrl={item.photo_url} />
+              <span><strong>{mine ? 'You' : firstName(item.name)}</strong><small>{item.completed_at ? 'Finished' : `${itemTotals.filled}/13`}</small></span>
+              <b><Count value={itemTotals.total} /></b>
+              {!mine && <span className={`presence ${player?.active ? 'online' : ''}`} aria-label={player?.active ? 'Active' : 'Away'} />}
+            </div>;
+          })}</div>}
           <div className="game-grid">
             <section className="sheet">
               <div className="sheet-head"><h2>{me?.name && me.name !== 'You' ? `${firstName(me.name)}’s` : 'Your'} score sheet</h2><button className={`pill filter ${openOnly ? '' : 'neutral'}`} aria-pressed={openOnly} onClick={() => setOpenOnly(!openOnly)}>{openOnly ? <Check size={12} /> : null}<Count value={score.remaining} /> left {openOnly ? '· show all' : <ChevronDown size={12} />}</button></div>
@@ -533,19 +656,20 @@ export default function Home() {
         </TabsList>
 
         <TabsContent value="home">
-          <div className="home-heading"><div><h1>{gameInProgress ? 'Pick up where you left off.' : waitingForPlayers ? 'Waiting for the final scores.' : 'Let’s play Yahtzee.'}</h1></div><button className="btn invite-top" onClick={() => setModal('invite')} disabled={!state}><UserPlus size={16} />Invite player</button></div>
+          <div className="home-heading"><div><h1>{gameInProgress ? 'Pick up where you left off.' : waitingForHost ? `Waiting for ${hostName} to start the next game.` : waitingForPlayers ? 'Waiting for the final scores.' : 'Let’s play Yahtzee.'}</h1></div><button className="btn invite-top" onClick={() => setModal('invite')} disabled={!state}><UserPlus size={16} />Invite player</button></div>
           <div className="home-grid">
             <section className="start-card">
               <div className="start-row">
                 <div className="start-mark"><Dices size={34} /></div>
-                <div className="start-actions"><button className="btn primary start-game" disabled={!state || !sheet || waitingForPlayers && !host || busy || !!savingCount} onClick={openCurrentGame}><Play size={17} />{gameInProgress ? 'Continue game' : game?.ended_at || score.remaining === 0 ? 'Play another game' : 'Start game'}</button>{gameInProgress && host && <button className="text-btn start-over" onClick={requestNewGame}>Start a new game</button>}</div>
+                <div className="start-actions"><button className="btn primary start-game" disabled={!state || !sheet || waitingForHost || waitingForPlayers && !host || busy || !!savingCount} onClick={openCurrentGame}><Play size={17} />{gameInProgress ? 'Continue game' : waitingForHost ? `Waiting for ${hostName}` : waitingForPlayers ? (host ? 'Start the next game' : 'Waiting for others to finish') : game?.ended_at || score.remaining === 0 ? 'Play another game' : 'Start game'}</button>{gameInProgress && host && <button className="text-btn start-over" onClick={requestNewGame}>Start a new game</button>}</div>
               </div>
             </section>
 
             <section className="players-card">
               <div className="card-heading"><div><p className="eyebrow">Players</p><h2>Ready to play</h2></div><span className="pill neutral"><Count value={activePlayers.length || 1} /> active</span></div>
-              <div className="active-player-list">{(state?.players.length ? state.players : me ? [{ ...me, active: true }] : []).map(player => <div className="active-player" key={player.id}><Avatar name={player.name} photoUrl={player.photo_url} /><span><strong>{player.name}{player.id === me?.id && player.name !== 'You' ? ' (you)' : ''}</strong><small>{player.active ? 'Ready now' : 'Away'}</small></span><span className={`presence ${player.active ? 'online' : ''}`} aria-label={player.active ? 'Active' : 'Away'} /></div>)}</div>
+              <div className="active-player-list">{(state?.players.length ? state.players : me ? [{ ...me, active: true }] : []).map(player => <div className="active-player" key={player.id}><Avatar name={player.name} photoUrl={player.photo_url} /><span><strong>{player.name}{player.id === me?.id && player.name !== 'You' ? ' (you)' : ''}</strong><small>{player.id === state?.room.host_id && onlineRoom ? 'Host · ' : ''}{player.active ? 'Ready now' : 'Away'}</small></span><span className={`presence ${player.active ? 'online' : ''}`} aria-label={player.active ? 'Active' : 'Away'} /></div>)}</div>
               {googleUser && state?.mode === 'online' && <div className="cloud-note"><Cloud size={16} /><span><strong>Online game connected</strong><small>Players can join from any network with the invite link or code.</small></span></div>}
+              {googleUser && onlineRoom && !host && <button className="text-btn leave-btn" disabled={busy} onClick={() => setLeaveOpen(true)}><LogOut size={14} />Leave this game</button>}
             </section>
           </div>
         </TabsContent>
@@ -594,7 +718,7 @@ export default function Home() {
           {me?.name === 'You' && <button className="btn" onClick={() => { setProfileName(''); setModal('profile'); }}>First, add your name<ArrowRight size={15} /></button>}
           {state && !browserMode && <div className="room-code">{state.room.code}</div>}
           {!browserMode && <button className="btn primary share-table" onClick={() => void shareTable()}><Share2 size={16} />Share invite</button>}
-          {!browserMode && <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'join-room', code: joinCode }); if (next) { setModal(null); setJoinCode(''); toast.success('You joined the game.'); } }}><label className="field-label" htmlFor="join-code">Invite code</label><div className="inline"><input id="join-code" className="field" placeholder="ABC123" autoCapitalize="characters" autoCorrect="off" maxLength={8} value={joinCode} onChange={event => setJoinCode(event.target.value.toUpperCase())} /><button className="btn" disabled={busy || ![4, 6, 8].includes(joinCode.replace(/[^a-z0-9]/gi, '').length)}>Join<ArrowRight size={14} /></button></div></form>}
+          {!browserMode && <form className="section-divider" onSubmit={async event => { event.preventDefault(); const next = await api({ action: 'join-room', code: joinCode }); if (next) { setModal(null); setJoinCode(''); toast.success('You joined the game.'); } }}><label className="field-label" htmlFor="join-code">Invite code</label><div className="inline"><input id="join-code" className="field" placeholder="ABC123" autoCapitalize="characters" autoCorrect="off" maxLength={8} value={joinCode} onChange={event => setJoinCode(event.target.value.toUpperCase())} /><button className="btn" disabled={busy || joinCode.replace(/[^a-z0-9]/gi, '').length < 4 || joinCode.replace(/[^a-z0-9]/gi, '').length > 8}>Join<ArrowRight size={14} /></button></div></form>}
           {host && !browserMode && state && <section className="section-divider member-management" aria-labelledby="manage-people-heading">
             <div className="card-heading"><div><p className="eyebrow">Room controls</p><h3 id="manage-people-heading">Manage people</h3></div><span className="pill neutral">{Math.max(0, state.players.length - 1)} joined</span></div>
             {state.players.some(player => player.id !== me?.id) ? state.players.filter(player => player.id !== me?.id).map(player => <div className="managed-member" key={player.id}>
@@ -603,12 +727,13 @@ export default function Home() {
               <button type="button" className="btn remove-member" disabled={busy} aria-label={`Remove ${player.name}`} onClick={() => setRemoveTarget({ id: player.id, name: player.name })}><Trash2 size={15} /></button>
             </div>) : <p className="install-note">No other people have joined yet.</p>}
           </section>}
+          {!host && onlineRoom && <div className="section-divider guest-note"><p className="install-note">You’re playing in {hostName === 'the host' ? 'someone else’s' : `${hostName}’s`} game. Joining another code moves you there.</p><button type="button" className="text-btn leave-btn" disabled={busy} onClick={() => setLeaveOpen(true)}><LogOut size={14} />Leave this game</button></div>}
           {browserMode && <p className="install-note">After signing in, this screen will show your room code and manual join box.</p>}
           {accountError && <div role="alert" className="inline-error">{accountError}</div>}
           {error && <div role="alert" className="inline-error">{error}</div>}
         </>}
 
-        {modal === 'new' && <><DialogHeader><DialogTitle>Start a new game?</DialogTitle><DialogDescription>This game isn’t finished. Starting over will save it as unfinished.</DialogDescription></DialogHeader><div className="actions"><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy || !host} onClick={() => void beginNewGame()}>Start new game<ArrowRight size={15} /></button></div>{error && <p className="inline-error">{error}</p>}</>}
+        {modal === 'new' && <><DialogHeader><DialogTitle>Start a new game?</DialogTitle><DialogDescription>{waitingForPlayers ? 'Some players are still filling in their sheets. Starting now saves this game as unfinished for everyone.' : 'This game isn’t finished. Starting over will save it as unfinished.'}</DialogDescription></DialogHeader><div className="actions"><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy || !host} onClick={() => void beginNewGame()}>Start new game<ArrowRight size={15} /></button></div>{error && <p className="inline-error">{error}</p>}</>}
         {modal === 'finish' && <><DialogHeader><DialogTitle>Final score</DialogTitle><DialogDescription>{me?.name === 'You' ? 'Your' : `${firstName(me?.name || 'Your')}’s`} game is complete.</DialogDescription></DialogHeader><div><div className="finish-line"><span>Upper section</span><strong><Count value={score.upper} /></strong></div>{phase >= 1 && <div className="finish-line"><span>Upper bonus</span><strong>{score.upperBonus ? <>+<Count value={35} /></> : <Count value={0} />}</strong></div>}{phase >= 2 && <div className="finish-line"><span>Lower section {sheet?.bonus ? '(includes Yahtzee bonus)' : ''}</span><strong><Count value={score.lower} /></strong></div>}</div><div className="finish-score"><p>GRAND TOTAL</p><strong><Count value={phase >= 3 ? score.total : 0} duration={700} /></strong></div><div className="actions"><button className="btn" onClick={() => { setModal(null); setHomeTab('history'); }}>Game history</button><button className="btn primary" onClick={() => { setModal(null); setHomeTab('home'); }}>Back home<ArrowRight size={15} /></button></div></>}
       </DialogContent>
     </Dialog>
@@ -630,6 +755,16 @@ export default function Home() {
           <AlertDialogDescription>Remove {removeTarget?.name} from this game? Their current unfinished score sheet will be removed too. They can rejoin later with an invite.</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction className="delete-action" disabled={busy} onClick={() => void confirmPlayerRemoval()}>Remove</AlertDialogAction></AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+
+    <AlertDialog open={leaveOpen} onOpenChange={setLeaveOpen}>
+      <AlertDialogContent className="delete-dialog">
+        <AlertDialogHeader>
+          <AlertDialogTitle>Leave this game?</AlertDialogTitle>
+          <AlertDialogDescription>You’ll go back to your own game. Finished games stay in everyone’s history, and you can rejoin any time with the invite code.</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter><AlertDialogCancel>Stay</AlertDialogCancel><AlertDialogAction className="delete-action" disabled={busy} onClick={event => { event.preventDefault(); void leaveGame(); }}>Leave</AlertDialogAction></AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
 
