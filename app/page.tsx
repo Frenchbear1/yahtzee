@@ -66,6 +66,7 @@ type StoredMutation = { body: Record<string, unknown>; gameId: string };
 // Rebuilds the on-screen change for a score saved on this phone while
 // offline, so it is still shown after the app is closed and reopened.
 function storedApply({ body, gameId }: StoredMutation) {
+  if (body.action === 'new-game') return newGameApply(body);
   return (current: State): State => {
     const updateGame = (item: Game): Game => item.id !== gameId ? item : {
       ...item,
@@ -78,6 +79,25 @@ function storedApply({ body, gameId }: StoredMutation) {
           }),
     };
     return { ...current, game: updateGame(current.game), history: current.history.map(updateGame) };
+  };
+}
+
+// Shows a new game right away, before (or without) the internet. Every player
+// in the room gets a blank sheet, just like when the game syncs.
+function newGameApply(body: Record<string, unknown>) {
+  return (current: State): State => {
+    const gameId = String(body.newGameId || '');
+    if (!gameId || current.history.some(item => item.id === gameId)) return current;
+    const startedAt = Number(body.startedAt) || Date.now();
+    const people = current.mode === 'online' && current.players.length ? current.players : [current.me];
+    const next: Game = {
+      id: gameId,
+      room_id: current.room.id,
+      started_at: startedAt,
+      ended_at: null,
+      sheets: people.map(player => ({ game_id: gameId, player_id: player.id, name: player.name, photo_url: player.photo_url, scores: {}, bonus: 0, revision: 0, completed_at: null })),
+    };
+    return { ...current, game: next, history: [next, ...current.history] };
   };
 }
 
@@ -252,19 +272,36 @@ export default function Home() {
   async function persistMutation(mutation: OptimisticMutation) {
     try {
       let next: State | null = null;
-      // No connection: the score stays on screen and on this phone, and is
-      // sent as soon as the internet is back (even after reopening the app).
+      let conflicts = 0;
+      // No connection: the change stays on screen and on this phone, and is
+      // sent in the background as soon as the internet is back (even after
+      // reopening the app). A slow connection never holds up the game.
       for (let attempt = 0; !next; attempt += 1) {
         await authGate.ready;
         const authoritative = snapshot.current;
-        if (!authoritative) throw new Error('Your score sheet needs to reconnect.');
-        const authoritativeGame = authoritative?.history.find(item => item.id === mutation.gameId);
-        const authoritativeSheet = authoritativeGame?.sheets.find(item => item.player_id === authoritative.me.id);
-        if (!authoritativeSheet) throw new Error('Your score sheet needs to reconnect.');
+        if (!authoritative) { await waitForConnection(Math.min(30000, 1000 * 2 ** attempt)); continue; }
+        let revision: number | undefined;
+        if (mutation.body.action !== 'new-game') {
+          const authoritativeGame = authoritative.history.find(item => item.id === mutation.gameId);
+          const authoritativeSheet = authoritativeGame?.sheets.find(item => item.player_id === authoritative.me.id);
+          if (!authoritativeSheet) {
+            if (conflicts >= 3) throw new Error('Your score sheet needs to reconnect.');
+            conflicts += 1;
+            if (!await reloadAuthoritative()) await waitForConnection(Math.min(30000, 1000 * 2 ** attempt));
+            continue;
+          }
+          revision = authoritativeSheet.revision;
+        }
         try {
-          next = await requestState({ ...mutation.body, gameId: mutation.gameId, revision: authoritativeSheet.revision });
+          next = await withTimeout(requestState({ ...mutation.body, gameId: mutation.gameId, ...(revision === undefined ? {} : { revision }) }), 20000);
         } catch (caught) {
           const failure = caught as Error & { status?: number };
+          // A save that timed out may still have gone through. Scores are set
+          // (not added), so reloading the sheet and sending again is safe.
+          if (failure.status === 409 && mutation.body.action !== 'new-game' && conflicts < 3) {
+            conflicts += 1;
+            if (await reloadAuthoritative()) continue;
+          }
           const transient = failure.status === 503 || failure.name === 'AbortError' || failure instanceof TypeError || (typeof navigator !== 'undefined' && !navigator.onLine);
           if (!transient) throw caught;
           await waitForConnection(Math.min(30000, 1000 * 2 ** attempt));
@@ -283,6 +320,27 @@ export default function Home() {
       setError(failure.name !== 'AbortError' ? failure.message : 'Connection lost. That score was not saved.');
       if (failure.status === 409) setTimeout(() => { void refreshRef.current(); }, 100);
     }
+  }
+
+  async function reloadAuthoritative() {
+    try {
+      const fresh = await withTimeout(requestState({ action: 'refresh' }), 20000);
+      snapshot.current = { ...fresh, notice: undefined };
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function withTimeout<T>(work: Promise<T>, ms: number) {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const failure = new Error('The connection is slow. Trying again in the background.');
+        failure.name = 'AbortError';
+        reject(failure);
+      }, ms);
+      work.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
+    });
   }
 
   function waitForConnection(delay: number) {
@@ -354,7 +412,6 @@ export default function Home() {
     const refreshNow = () => { if (document.visibilityState === 'visible') void api({ action: 'refresh' }, true); };
     const reconnect = () => {
       setOffline(false);
-      if (pendingMutations.current.length) toast('Back online. Syncing your scores…');
       void api({ action: 'bootstrap' }, true);
     };
     const wentOffline = () => setOffline(true);
@@ -397,7 +454,9 @@ export default function Home() {
     // in local mode so the app is never stuck on a blank screen.
     // Offline with a signed-in game on screen: keep showing it and keep
     // scores waiting on this phone rather than switching to the local sheet.
-    const holdOnlineSheet = () => !navigator.onLine && snapshot.current?.mode === 'online';
+    // The same goes for a weak signal that still counts as "online": never
+    // swap a signed-in player onto the local sheet just because Google is slow.
+    const holdOnlineSheet = () => snapshot.current?.mode === 'online';
     const fallback = setTimeout(() => {
       if (stopped || resolved || !pagesBuild || holdOnlineSheet()) return;
       resolved = true;
@@ -441,7 +500,7 @@ export default function Home() {
       }
     }).then(stop => { if (stopped) stop(); else unsubscribe = stop; }).catch(caught => {
       if (stopped || resolved) return;
-      if (holdOnlineSheet()) return; // retried by the online listener below
+      if (holdOnlineSheet()) { setTimeout(retry, 15000); return; } // keep trying quietly
       setAccountError(caught instanceof Error ? caught.message : 'Google sign-in could not load.');
       resolved = true;
       openAuthGate();
@@ -516,12 +575,19 @@ export default function Home() {
 
   async function beginNewGame() {
     if (!game || !host) return;
+    if (pagesBuild) {
+      // Starts instantly on this phone; the cloud copy catches up in the background.
+      const body = { action: 'new-game', confirm: true, newGameId: crypto.randomUUID(), startedAt: new Date().getTime() };
+      enqueueMutation({ body, gameId: game.id, apply: newGameApply(body) });
+      setModal(null); setView('game'); toast.success('New game started.');
+      return;
+    }
     const next = await api({ action: 'new-game', gameId: game.id, confirm: true });
     if (next) { setModal(null); setView('game'); toast.success('New game started.'); }
   }
 
   function requestNewGame() {
-    if (!game || !host || busy || savingCount) return;
+    if (!game || !host || (!pagesBuild && (busy || savingCount))) return;
     if (game.ended_at || score.remaining === 0) void beginNewGame();
     else if (score.filled === 0) setView('game');
     else setModal('new');
@@ -654,7 +720,7 @@ export default function Home() {
     <Toaster position="top-center" richColors />
     <header className="topbar">
       <button className="brand brand-button" onClick={() => { setView('home'); setHomeTab('home'); }} aria-label="Go to Yahtzee home"><span className="brand-icon"><Dice5 size={28} strokeWidth={1.7} /></span><span>Yahtzee</span></button>
-      <div className="header-right">{offline && <span className="offline-pill" role="status" title="Scores are saved on this device and sync when you're back online."><WifiOff size={13} />{savingCount ? `${savingCount} to sync` : 'Offline'}</span>}<button className="profile-btn" onClick={() => { setProfileName(me?.name === 'You' ? '' : me?.name || ''); setModal('profile'); }}><Avatar name={googleUser?.displayName || me?.name || 'You'} photoUrl={profilePhoto} /><span>{headerName}</span>{googleUser ? <ChevronDown size={13} /> : <LogIn size={13} />}</button></div>
+      <div className="header-right">{(offline || savingCount > 0) && <span className="offline-pill" role="status" title="Everything is saved on this device and syncs in the background."><WifiOff size={13} />{savingCount ? `${savingCount} to sync` : 'Offline'}</span>}<button className="profile-btn" onClick={() => { setProfileName(me?.name === 'You' ? '' : me?.name || ''); setModal('profile'); }}><Avatar name={googleUser?.displayName || me?.name || 'You'} photoUrl={profilePhoto} /><span>{headerName}</span>{googleUser ? <ChevronDown size={13} /> : <LogIn size={13} />}</button></div>
     </header>
 
     <main className="shell">
@@ -712,7 +778,7 @@ export default function Home() {
             <section className="start-card">
               <div className="start-row">
                 <div className="start-mark"><Dices size={34} /></div>
-                <div className="start-actions"><button className="btn primary start-game" disabled={!state || !sheet || waitingForHost || waitingForPlayers && !host || busy || !!savingCount} onClick={openCurrentGame}><Play size={17} />{gameInProgress ? 'Continue game' : waitingForHost ? `Waiting for ${hostName}` : waitingForPlayers ? (host ? 'Start the next game' : 'Waiting for others to finish') : game?.ended_at || score.remaining === 0 ? 'Play another game' : 'Start game'}</button>{gameInProgress && host && <button className="text-btn start-over" onClick={requestNewGame}>Start a new game</button>}</div>
+                <div className="start-actions"><button className="btn primary start-game" disabled={!state || !sheet || waitingForHost || waitingForPlayers && !host || (!pagesBuild && (busy || !!savingCount))} onClick={openCurrentGame}><Play size={17} />{gameInProgress ? 'Continue game' : waitingForHost ? `Waiting for ${hostName}` : waitingForPlayers ? (host ? 'Start the next game' : 'Waiting for others to finish') : game?.ended_at || score.remaining === 0 ? 'Play another game' : 'Start game'}</button>{gameInProgress && host && <button className="text-btn start-over" onClick={requestNewGame}>Start a new game</button>}</div>
               </div>
             </section>
 

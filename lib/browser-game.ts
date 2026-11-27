@@ -306,8 +306,10 @@ export async function browserGameRequest(body: Record<string, unknown>): Promise
     }
   } else if (action === 'new-game') {
     const latest = roomGames(store)[0];
+    const proposedId = String(body.newGameId || '');
+    if (latest && proposedId && latest.id === proposedId) return snapshot(store); // already started
     if (!latest || latest.id !== String(body.gameId || '')) fail('A new game has already started. Your game is refreshed.', 409);
-    const gameId = id(), now = Date.now();
+    const gameId = /^[a-zA-Z0-9_-]{1,128}$/.test(proposedId) ? proposedId : id(), now = Date.now();
     store.games.push({ id: gameId, room_id: store.currentRoom, started_at: now, ended_at: null, sheets: [sheet(gameId, store.me.id, store.me.name)] });
   } else if (!['bootstrap', 'refresh'].includes(action)) {
     fail('Unknown action.');

@@ -570,7 +570,9 @@ function sheetsFor(memberIds: string[], members: Map<string, MemberRecord>, game
 
 async function newGame(db: FirebaseFirestore, user: FirebaseUser, room: RoomRecord, body: Record<string, unknown>) {
   if (room.host_id !== user.uid) fail('The game host starts the next game.', 403);
-  const gameId = crypto.randomUUID();
+  // The phone picks the id so a game started offline keeps the same id once synced.
+  const proposedId = String(body.newGameId || '');
+  const gameId = /^[a-zA-Z0-9_-]{1,128}$/.test(proposedId) ? proposedId : crypto.randomUUID();
   const members = new Map((await currentMembers(db, room.id)).map(member => [member.id, member]));
   const now = Date.now();
   await db.runTransaction(async transaction => {
@@ -578,6 +580,7 @@ async function newGame(db: FirebaseFirestore, user: FirebaseUser, room: RoomReco
     const roomDocument = await transaction.get(roomReference);
     if (!roomDocument.exists) fail('That game was not found.', 404);
     const latestRoom = parseRoom(roomDocument.id, roomDocument.data());
+    if (latestRoom.current_game_id === gameId) return; // already synced (a retry after a slow connection)
     if (latestRoom.current_game_id !== String(body.gameId || '')) fail('A new game has already started. Your game is refreshed.', 409);
     const oldReference = gameRef(db, room.id, latestRoom.current_game_id);
     const oldDocument = await transaction.get(oldReference);

@@ -123,4 +123,16 @@ B = await b({ action: 'import-local', data: { version: 1, games: [localGame] } }
 assert.equal(B.notice, undefined);
 check('signed-out games are imported into the account once');
 
+// A game started offline keeps the id the phone gave it, and a retry after a
+// slow connection (that actually went through) doesn't fail or start another.
+const previousId = B.game.id;
+B = await b({ action: 'new-game', gameId: previousId, confirm: true, newGameId: 'offline-game-1' });
+assert.equal(B.game.id, 'offline-game-1');
+B = await b({ action: 'new-game', gameId: previousId, confirm: true, newGameId: 'offline-game-1' });
+assert.equal(B.game.id, 'offline-game-1');
+assert.equal(B.history.filter((g: any) => g.id === 'offline-game-1').length, 1);
+B = await b({ action: 'score', gameId: 'offline-game-1', category: 'chance', value: 20, revision: 0 });
+assert.equal(mine(B).scores.chance, 20);
+check('a game started offline syncs with the same id and retries safely');
+
 console.log(`PASS: ${checks} online room checks`);
