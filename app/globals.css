@@ -149,3 +149,6 @@
 @media(max-width:760px){.table-strip{margin-bottom:10px}.table-chip{min-width:132px;padding:6px 10px 6px 6px}.table-chip b{font-size:16px}.offline-pill{margin-right:4px;padding:5px 8px;font-size:11px}}
 /* The animated number is a span too; keep it full size (only "pts" is small). */
 .total-number .number-ticker{font-size:inherit;color:inherit;margin:0;letter-spacing:inherit;font-weight:inherit}
+
+/* Resume button inside an auto-finished game in history */
+.history-resume { width: 100%; margin-bottom: 14px; }

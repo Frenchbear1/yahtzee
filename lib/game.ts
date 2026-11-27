@@ -10,14 +10,23 @@ export const categories = [
 export type Category = typeof categories[number];
 export type Scores = Record<string,number|null>;
 export type Sheet = {game_id:string;player_id:string;name:string;photo_url:string|null;scores:Scores;bonus:number;revision:number;completed_at:number|null};
-export type Game = {id:string;room_id:string;started_at:number;ended_at:number|null;sheets:Sheet[]};
+export type Game = {id:string;room_id:string;started_at:number;ended_at:number|null;sheets:Sheet[];updated_at?:number};
+// A game nobody has scored in for this long is moved to history as finished.
+export const staleAfter = 6 * 60 * 60 * 1000;
+// Finished means ended, or left behind when a newer game became the current one.
+export function gameFinished(game:Game,currentId?:string){return !!game.ended_at||(!!currentId&&game.id!==currentId);}
+// A finished game where someone still had empty boxes (counted as 0). It can be resumed.
+export function gameResumable(game:Game,currentId?:string){return gameFinished(game,currentId)&&game.sheets.some(sheet=>totals(sheet.scores,sheet.bonus).filled<13);}
 export type Room = {id:string;name:string;code:string;host_id:string};
 export type TablePlayer = {id:string;name:string;photo_url:string|null;active:boolean};
 export type ManagedRoom = Room & {members:Array<{id:string;name:string;photo_url:string|null}>};
 export type State = {me:{id:string;name:string;photo_url:string|null};room:Room;rooms:Room[];managedRooms:ManagedRoom[];players:TablePlayer[];game:Game;history:Game[];mode?:string;notice?:string};
 export function totals(scores:Scores={},bonus=0){const upper=categories.slice(0,6).reduce((a,c)=>a+(scores[c.id]??0),0);const upperBonus=upper>=63?35:0;const lower=categories.slice(6).reduce((a,c)=>a+(scores[c.id]??0),0)+bonus*100;const filled=categories.filter(c=>scores[c.id]!==null&&scores[c.id]!==undefined).length;return{upper,upperBonus,upperTotal:upper+upperBonus,lower,total:upper+upperBonus+lower,filled,remaining:13-filled};}
 export function validScore(id:string,value:unknown){const c=categories.find(c=>c.id===id);if(!c)return false;if(value===null)return true;if(typeof value!=='number'||!Number.isInteger(value))return false;if('face'in c)return value>=0&&value<=c.face*5&&value%c.face===0;if('fixed'in c)return value===0||value===c.fixed;return value===0||(value>=5&&value<=30);}
-export function leaderboard(history:Game[]){const rows=new Map<string,{id:string;name:string;photo_url:string|null;games:number;wins:number;best:number;sum:number}>();for(const g of history){if(!g.ended_at||!g.sheets.length||g.sheets.some(s=>!s.completed_at))continue;const max=Math.max(...g.sheets.map(s=>totals(s.scores,s.bonus).total));for(const s of g.sheets){const t=totals(s.scores,s.bonus).total;const r=rows.get(s.player_id)||{id:s.player_id,name:s.name,photo_url:s.photo_url||null,games:0,wins:0,best:0,sum:0};r.name=s.name;r.photo_url=s.photo_url||r.photo_url;r.games++;r.sum+=t;r.best=Math.max(r.best,t);if(g.sheets.length>1&&t===max)r.wins++;rows.set(s.player_id,r);}}return[...rows.values()].sort((a,b)=>b.wins-a.wins||b.best-a.best);}
+export function leaderboard(history:Game[],currentId?:string){const rows=new Map<string,{id:string;name:string;photo_url:string|null;games:number;wins:number;best:number;sum:number}>();for(const g of history){if(!gameFinished(g,currentId))continue;
+ // Empty boxes count as 0. A player who never scored in a game isn't counted for it.
+ const played=g.sheets.filter(s=>totals(s.scores,s.bonus).filled>0||s.bonus>0);if(!played.length)continue;
+ const max=Math.max(...played.map(s=>totals(s.scores,s.bonus).total));for(const s of played){const t=totals(s.scores,s.bonus).total;const r=rows.get(s.player_id)||{id:s.player_id,name:s.name,photo_url:s.photo_url||null,games:0,wins:0,best:0,sum:0};r.name=s.name;r.photo_url=s.photo_url||r.photo_url;r.games++;r.sum+=t;r.best=Math.max(r.best,t);if(played.length>1&&t===max)r.wins++;rows.set(s.player_id,r);}}return[...rows.values()].sort((a,b)=>b.wins-a.wins||b.best-a.best);}
 
 export type BonusPlan = Record<string,number>;
 export function bonusPlans(scores:Scores={},limit=3){

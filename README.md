@@ -10,6 +10,8 @@ Tap **Invite player** to share a deep link or the six-character room code. Openi
 
 - **Who's here:** a player shows as *Ready now* while their app is open, and *Away* about 30 seconds after they close it. Presence uses the Firestore server clock, so a phone with the wrong time still shows up correctly.
 - **During a game:** a live strip above the score sheet shows everyone's total and progress.
+- **Idle games:** a game nobody has scored in for 6 hours is moved to history as finished, on whichever player's phone notices first (after anything waiting to sync has synced). Empty boxes count as 0, and it counts on the leaderboard. Starting a new game over an unfinished one does the same. The host can tap **Resume this game** in Game history to bring it back; a blank current game is dropped, and a game in progress goes to history.
+- **Who's in a new game:** only players who are here (app open recently) get a sheet, so away players don't clutter the score strip. If they come back mid-game they can tap **Join this game**. The strip above the score sheet hides away players who haven't scored.
 - **Joining late:** joining a finished game doesn't reopen it; the newcomer gets a sheet when the host starts the next game.
 - **Leaving:** guests can tap **Leave this game** (Home or the invite screen) to go back to their own game. Their unfinished sheet is removed so it never blocks the others. Hosts can remove players from the invite screen; removed players see a short notice.
 - **Names:** a name changed under Profile is kept across sign-ins and devices instead of being reset to the Google name.

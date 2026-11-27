@@ -1,4 +1,4 @@
-import { gameHasMoves, totals, validScore, type Game, type Room, type Scores, type Sheet, type State } from './game';
+import { gameHasMoves, staleAfter, totals, validScore, type Game, type Room, type Scores, type Sheet, type State } from './game';
 import {
   getFirebaseFirestore,
   serverTimestamp,
@@ -328,6 +328,7 @@ function displayGame(game: StoredGame, members: Map<string, MemberRecord>): Game
     room_id: game.room_id,
     started_at: game.started_at,
     ended_at: game.ended_at,
+    updated_at: game.updated_at,
     sheets: Object.values(game.sheets).map(sheet => {
       const member = members.get(sheet.player_id);
       return member ? { ...sheet, name: member.name, photo_url: member.photo_url } : sheet;
@@ -559,6 +560,13 @@ async function mutateScore(db: FirebaseFirestore, user: FirebaseUser, room: Room
   });
 }
 
+// New games only include people who are here: the host, whoever starts it,
+// and anyone whose app checked in recently. Away players can join later.
+function presentIds(memberIds: string[], members: Map<string, MemberRecord>, keep: string[]) {
+  const now = Date.now() + serverOffset;
+  return memberIds.filter(playerId => keep.includes(playerId) || now - (members.get(playerId)?.last_seen || 0) < activeWindow);
+}
+
 function sheetsFor(memberIds: string[], members: Map<string, MemberRecord>, gameId: string) {
   const sheets: Record<string, Sheet> = {};
   for (const playerId of memberIds) {
@@ -592,8 +600,10 @@ async function newGame(db: FirebaseFirestore, user: FirebaseUser, room: RoomReco
       started_at: now,
       ended_at: null,
       updated_at: now,
-      sheets: sheetsFor(latestRoom.member_ids, members, gameId),
+      sheets: sheetsFor(presentIds(latestRoom.member_ids, members, [latestRoom.host_id, user.uid]), members, gameId),
     });
+    // The old game goes to history as finished (empty boxes count as 0).
+    if (oldGame && !oldGame.ended_at && gameHasMoves(displayGame(oldGame, new Map()))) transaction.update(oldReference, { ended_at: now });
     transaction.update(roomReference, { current_game_id: gameId, updated_at: now });
   });
 }
@@ -620,13 +630,71 @@ async function deleteGame(db: FirebaseFirestore, user: FirebaseUser, room: RoomR
         started_at: now,
         ended_at: null,
         updated_at: now,
-        sheets: sheetsFor(latestRoom.member_ids, members, replacementId),
+        sheets: sheetsFor(presentIds(latestRoom.member_ids, members, [latestRoom.host_id, user.uid]), members, replacementId),
       });
       transaction.update(roomReference, { current_game_id: replacementId, updated_at: now });
     } else {
       // Bumping updated_at tells every player's app to reload the history.
       transaction.update(roomReference, { updated_at: Math.max(now, latestRoom.updated_at + 1) });
     }
+  });
+}
+
+// Any player's device closes a game nobody has scored in for 6 hours. Only
+// ended_at changes, so everyone's sheets stay exactly as they were.
+async function finishStaleGame(db: FirebaseFirestore, room: RoomRecord, body: Record<string, unknown>) {
+  const reference = gameRef(db, room.id, String(body.gameId || ''));
+  await db.runTransaction(async transaction => {
+    const document = await transaction.get(reference);
+    if (!document.exists) return;
+    const game = parseStoredGame(document.id, document.data());
+    if (game.ended_at || !gameHasMoves(displayGame(game, new Map()))) return;
+    if (Date.now() + serverOffset - (game.updated_at || game.started_at) < staleAfter) return;
+    transaction.update(reference, { ended_at: Date.now() });
+  });
+}
+
+// Makes a finished game from history the current game again. Whatever game
+// was current goes to history (or is dropped if nobody scored in it).
+async function resumeGame(db: FirebaseFirestore, user: FirebaseUser, room: RoomRecord, body: Record<string, unknown>) {
+  if (room.host_id !== user.uid) fail('The game host resumes games.', 403);
+  const gameId = String(body.gameId || '');
+  await db.runTransaction(async transaction => {
+    const roomReference = roomRef(db, room.id);
+    const roomDocument = await transaction.get(roomReference);
+    if (!roomDocument.exists) fail('That game was not found.', 404);
+    const latestRoom = parseRoom(roomDocument.id, roomDocument.data());
+    const targetReference = gameRef(db, room.id, gameId);
+    const targetDocument = await transaction.get(targetReference);
+    if (!targetDocument.exists) fail('That game was deleted.', 404);
+    const target = parseStoredGame(targetDocument.id, targetDocument.data());
+    if (latestRoom.current_game_id === gameId && !target.ended_at) return; // already resumed
+    const oldReference = latestRoom.current_game_id && latestRoom.current_game_id !== gameId ? gameRef(db, room.id, latestRoom.current_game_id) : null;
+    const oldDocument = oldReference ? await transaction.get(oldReference) : null;
+    const now = Date.now();
+    if (oldReference && oldDocument?.exists) {
+      const oldGame = parseStoredGame(oldDocument.id, oldDocument.data());
+      if (!gameHasMoves(displayGame(oldGame, new Map()))) transaction.delete(oldReference);
+      else if (!oldGame.ended_at) transaction.update(oldReference, { ended_at: now });
+    }
+    transaction.update(targetReference, { ended_at: null, updated_at: now });
+    transaction.update(roomReference, { current_game_id: gameId, updated_at: Math.max(now, latestRoom.updated_at + 1) });
+  });
+}
+
+// A player who was away when the game started can still jump in.
+async function joinCurrentGame(db: FirebaseFirestore, user: FirebaseUser, room: RoomRecord) {
+  await db.runTransaction(async transaction => {
+    const roomDocument = await transaction.get(roomRef(db, room.id));
+    if (!roomDocument.exists) fail('That game was not found.', 404);
+    const latestRoom = parseRoom(roomDocument.id, roomDocument.data());
+    if (!latestRoom.member_ids.includes(user.uid)) fail('You’re no longer in this game.', 403);
+    const reference = gameRef(db, room.id, latestRoom.current_game_id);
+    const document = await transaction.get(reference);
+    const game = document.exists ? parseStoredGame(document.id, document.data()) : null;
+    if (!game || game.ended_at) fail('This game is over. You’ll get a sheet when the next game starts.', 409);
+    if (game.sheets[user.uid]) return;
+    transaction.update(reference, { [`sheets.${user.uid}`]: blankSheet(game.id, profile(user)), updated_at: Date.now() });
   });
 }
 
@@ -754,6 +822,12 @@ export async function firebaseGameRequest(body: Record<string, unknown>, user: F
       await newGame(db, user, room, body);
     } else if (action === 'delete-game') {
       await deleteGame(db, user, room, body);
+    } else if (action === 'finish-stale') {
+      await finishStaleGame(db, room, body);
+    } else if (action === 'resume-game') {
+      await resumeGame(db, user, room, body);
+    } else if (action === 'join-current') {
+      await joinCurrentGame(db, user, room);
     } else {
       fail('Unknown action.');
     }

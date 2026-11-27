@@ -86,9 +86,13 @@ check('a guest can leave; their unfinished sheet no longer blocks the game');
 B = await b({ action: 'join-room', code: A.room.code });
 assert(B.game.ended_at); assert.equal(mine(B), undefined);
 await fails(b({ action: 'score', gameId: B.game.id, revision: 0, category: 'ones', value: 3 }), /next game/);
+// Both phones check in (the clock skew test above left Alice's offset stale).
+Date.now = () => realNow() + 90_000;
+await b({ action: 'refresh' }); A = await a({ action: 'refresh' });
 A = await a({ action: 'new-game', gameId: A.game.id });
 assert.equal(A.game.sheets.length, 2);
 B = await b({ action: 'refresh' });
+Date.now = realNow;
 assert(mine(B)); assert.equal(B.history.length, 2);
 check('late joiners wait for the next game, then get a sheet');
 
@@ -134,5 +138,50 @@ assert.equal(B.history.filter((g: any) => g.id === 'offline-game-1').length, 1);
 B = await b({ action: 'score', gameId: 'offline-game-1', category: 'chance', value: 20, revision: 0 });
 assert.equal(mine(B).scores.chance, 20);
 check('a game started offline syncs with the same id and retries safely');
+
+// A game nobody has touched for 6 hours is closed (empty boxes count as 0),
+// and only then: a recent game is left alone.
+const { leaderboard } = await import('../lib/game.ts');
+const later = (ms: number) => { Date.now = () => realNow() + ms; };
+const hours = (n: number) => n * 3_600_000;
+later(100_000);
+B = await b({ action: 'finish-stale', gameId: 'offline-game-1' });
+assert.equal(B.game.ended_at, null);
+later(hours(7));
+B = await b({ action: 'finish-stale', gameId: 'offline-game-1' });
+assert(B.game.ended_at); assert.equal(B.game.id, 'offline-game-1');
+assert(leaderboard(B.history, B.game.id).some(row => row.id === 'bob'));
+check('a game idle for 6 hours is finished automatically, not before');
+
+// Resume brings it back; the blank game that replaced it disappears.
+later(hours(7) + 1_000);
+B = await b({ action: 'new-game', gameId: 'offline-game-1', confirm: true, newGameId: 'blank-next' });
+B = await b({ action: 'resume-game', gameId: 'offline-game-1' });
+assert.equal(B.game.id, 'offline-game-1'); assert.equal(B.game.ended_at, null);
+assert(!B.history.some((g: any) => g.id === 'blank-next'));
+B = await b({ action: 'score', gameId: 'offline-game-1', category: 'ones', value: 3, revision: mine(B).revision });
+assert.equal(mine(B).scores.ones, 3);
+check('a finished game can be resumed from history');
+
+// Starting a new game moves an unfinished one to history as finished.
+B = await b({ action: 'new-game', gameId: 'offline-game-1', confirm: true, newGameId: 'after-resume' });
+assert(B.history.find((g: any) => g.id === 'offline-game-1').ended_at);
+check('starting a new game files the unfinished one as finished');
+
+// New games only include people who are here; the away player can jump in.
+later(hours(7) + 2_000);
+B = await b({ action: 'join-room', code: A.room.code });
+later(hours(7) + 100_000); // Bob closes the app; Alice is still here
+A = await a({ action: 'refresh' });
+A = await a({ action: 'new-game', gameId: A.game.id, confirm: true });
+assert.deepEqual(A.game.sheets.map((s: any) => s.player_id), ['alice']);
+B = await b({ action: 'refresh' });
+assert.equal(mine(B), undefined); assert.equal(B.game.ended_at, null);
+B = await b({ action: 'join-current' });
+assert(mine(B));
+A = await a({ action: 'refresh' });
+assert.equal(A.game.sheets.length, 2);
+Date.now = realNow;
+check('away players are left out of a new game and can join it when back');
 
 console.log(`PASS: ${checks} online room checks`);

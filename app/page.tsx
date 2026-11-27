@@ -12,7 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Progress } from '@/components/ui/progress';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Toaster, toast } from 'sonner';
-import { bonusPlans, categories, gameHasMoves, leaderboard, totals, type Category, type Game, type Sheet, type State } from '@/lib/game';
+import { bonusPlans, categories, gameFinished, gameHasMoves, gameResumable, leaderboard, staleAfter, totals, type Category, type Game, type Sheet, type State } from '@/lib/game';
 import { browserGameRequest, browserStorageAvailable, browserStoreKey, exportBrowserCloudData } from '@/lib/browser-game';
 import { firebaseGameRequest } from '@/lib/firebase-game';
 import { getGoogleIdToken, loadGoogleScores, signInWithGoogle, signOutGoogle, watchGoogleAccount, type GoogleAccount } from '@/lib/firebase-profile';
@@ -67,6 +67,8 @@ type StoredMutation = { body: Record<string, unknown>; gameId: string };
 // offline, so it is still shown after the app is closed and reopened.
 function storedApply({ body, gameId }: StoredMutation) {
   if (body.action === 'new-game') return newGameApply(body);
+  if (body.action === 'finish-stale') return finishApply(gameId, body);
+  if (body.action === 'resume-game') return resumeApply(gameId, body);
   return (current: State): State => {
     const updateGame = (item: Game): Game => item.id !== gameId ? item : {
       ...item,
@@ -89,7 +91,8 @@ function newGameApply(body: Record<string, unknown>) {
     const gameId = String(body.newGameId || '');
     if (!gameId || current.history.some(item => item.id === gameId)) return current;
     const startedAt = Number(body.startedAt) || Date.now();
-    const people = current.mode === 'online' && current.players.length ? current.players : [current.me];
+    const present = current.players.filter(player => player.active || player.id === current.me.id || player.id === current.room.host_id);
+    const people = current.mode === 'online' && present.length ? present : [current.me];
     const next: Game = {
       id: gameId,
       room_id: current.room.id,
@@ -97,7 +100,36 @@ function newGameApply(body: Record<string, unknown>) {
       ended_at: null,
       sheets: people.map(player => ({ game_id: gameId, player_id: player.id, name: player.name, photo_url: player.photo_url, scores: {}, bonus: 0, revision: 0, completed_at: null })),
     };
-    return { ...current, game: next, history: [next, ...current.history] };
+    const old = current.game;
+    const history = current.history.map(item => item.id === old?.id && !item.ended_at && gameHasMoves(item) ? { ...item, ended_at: startedAt } : item);
+    return { ...current, game: next, history: [next, ...history] };
+  };
+}
+
+// A game nobody touched for 6 hours moves to history as finished.
+function finishApply(gameId: string, body: Record<string, unknown>) {
+  return (current: State): State => {
+    const at = Number(body.at) || Date.now();
+    const end = (item: Game): Game => item.id === gameId && !item.ended_at ? { ...item, ended_at: at } : item;
+    return { ...current, game: end(current.game), history: current.history.map(end) };
+  };
+}
+
+// Brings a finished game back as the current game. The game that was current
+// goes to history (or disappears if nobody scored in it).
+function resumeApply(gameId: string, body: Record<string, unknown>) {
+  return (current: State): State => {
+    const target = current.history.find(item => item.id === gameId);
+    if (!target || (current.game.id === gameId && !current.game.ended_at)) return current;
+    const at = Number(body.at) || Date.now();
+    const old = current.game;
+    let history = current.history;
+    if (old.id !== gameId) {
+      if (!gameHasMoves(old)) history = history.filter(item => item.id !== old.id);
+      else if (!old.ended_at) history = history.map(item => item.id === old.id ? { ...item, ended_at: at } : item);
+    }
+    const resumed: Game = { ...target, ended_at: null, updated_at: at };
+    return { ...current, game: resumed, history: history.map(item => item.id === gameId ? resumed : item) };
   };
 }
 
@@ -281,7 +313,8 @@ export default function Home() {
         const authoritative = snapshot.current;
         if (!authoritative) { await waitForConnection(Math.min(30000, 1000 * 2 ** attempt)); continue; }
         let revision: number | undefined;
-        if (mutation.body.action !== 'new-game') {
+        const sheetChange = mutation.body.action === 'score' || mutation.body.action === 'bonus';
+        if (sheetChange) {
           const authoritativeGame = authoritative.history.find(item => item.id === mutation.gameId);
           const authoritativeSheet = authoritativeGame?.sheets.find(item => item.player_id === authoritative.me.id);
           if (!authoritativeSheet) {
@@ -298,7 +331,7 @@ export default function Home() {
           const failure = caught as Error & { status?: number };
           // A save that timed out may still have gone through. Scores are set
           // (not added), so reloading the sheet and sending again is safe.
-          if (failure.status === 409 && mutation.body.action !== 'new-game' && conflicts < 3) {
+          if (failure.status === 409 && sheetChange && conflicts < 3) {
             conflicts += 1;
             if (await reloadAuthoritative()) continue;
           }
@@ -512,6 +545,34 @@ export default function Home() {
     return () => { stopped = true; clearTimeout(fallback); window.removeEventListener('online', retry); unsubscribe?.(); };
   }, [api, importLocalGames, lanMode, openAuthGate, pagesBuild]);
 
+  // Checks now and then (and whenever the app comes back to the screen) for a
+  // game nobody has scored in for 6 hours, and moves it to history as finished.
+  // Waits until everything on this phone has synced, so offline scores count.
+  const finishTried = useRef('');
+  useEffect(() => {
+    if (!pagesBuild) return;
+    const check = () => {
+      const current = snapshot.current;
+      if (!current || !authReady.current || pendingMutations.current.length) return;
+      const stale = current.game;
+      if (!stale || stale.ended_at || !gameHasMoves(stale)) return;
+      if (typeof stale.updated_at !== 'number' || !stale.updated_at) return; // wait for real activity data
+      const lastActive = stale.updated_at;
+      if (new Date().getTime() - lastActive < staleAfter) return;
+      const key = `${stale.id}:${lastActive}`;
+      if (finishTried.current === key) return;
+      finishTried.current = key;
+      const body = { action: 'finish-stale', at: new Date().getTime() };
+      enqueueRef.current({ body, gameId: stale.id, apply: finishApply(stale.id, body) });
+      setView('home');
+    };
+    const first = setTimeout(check, 1500);
+    const timer = setInterval(check, 60000);
+    const visible = () => { if (document.visibilityState === 'visible') check(); };
+    document.addEventListener('visibilitychange', visible);
+    return () => { clearTimeout(first); clearInterval(timer); document.removeEventListener('visibilitychange', visible); };
+  }, [pagesBuild, ready]);
+
   useEffect(() => {
     if (modal !== 'finish') return;
     setPhase(0);
@@ -591,6 +652,20 @@ export default function Home() {
     if (game.ended_at || score.remaining === 0) void beginNewGame();
     else if (score.filled === 0) setView('game');
     else setModal('new');
+  }
+
+  function resumeGame(target: Game) {
+    if (!host || !pagesBuild) return;
+    const body = { action: 'resume-game', at: new Date().getTime() };
+    enqueueMutation({ body, gameId: target.id, apply: resumeApply(target.id, body) });
+    setHomeTab('home');
+    setView('game');
+    toast.success('Game resumed.');
+  }
+
+  async function joinCurrentGame() {
+    const next = await api({ action: 'join-current' });
+    if (next) { setView('game'); toast.success('You’re in this game.'); }
   }
 
   function openCurrentGame() {
@@ -684,12 +759,15 @@ export default function Home() {
     toast.success(`${target.name} was removed`);
   }
 
-  const live = game ? [...game.sheets].sort((a, b) => totals(b.scores, b.bonus).total - totals(a.scores, a.bonus).total) : [];
+  // The strip shows who is actually playing: you, anyone here, and anyone
+  // who has scored. Away players with an empty sheet stay out of the way.
+  const live = game ? [...game.sheets].filter(item => item.player_id === me?.id || !!item.completed_at
+    || totals(item.scores, item.bonus).filled > 0 || !!state?.players.find(player => player.id === item.player_id)?.active).sort((a, b) => totals(b.scores, b.bonus).total - totals(a.scores, a.bonus).total) : [];
   const visibleHistory = state?.history.filter(gameHasMoves) || [];
-  const played = visibleHistory.filter(item => item.ended_at);
-  const leaders = leaderboard(visibleHistory);
+  const played = visibleHistory.filter(item => gameFinished(item, game?.id));
+  const leaders = leaderboard(visibleHistory, game?.id);
   const best = played.length ? Math.max(...played.flatMap(item => item.sheets.map(playerSheet => totals(playerSheet.scores, playerSheet.bonus).total))) : 0;
-  const groups = visibleHistory.filter(item => item.id !== game?.id || item.ended_at).reduce<Record<string, Game[]>>((acc, item) => {
+  const groups = visibleHistory.filter(item => gameFinished(item, game?.id)).reduce<Record<string, Game[]>>((acc, item) => {
     const key = fmtDate(item.started_at);
     (acc[key] ??= []).push(item);
     return acc;
@@ -703,6 +781,8 @@ export default function Home() {
   // host to start the next one.
   const waitingForHost = !host && !!state && !!game && (!sheet || !!game.ended_at);
   const onlineRoom = state?.mode === 'online';
+  // A guest who was away when this game started can still jump in.
+  const canJoinCurrent = !host && onlineRoom && !!game && !sheet && !game.ended_at;
 
   function row(chosen: Category, index: number) {
     const value = sheet?.scores[chosen.id], filled = value !== null && value !== undefined, Icon = icons[index];
@@ -728,7 +808,7 @@ export default function Home() {
 
       {view === 'game' ? <>
           {state && !sheet && <p className="inline-error" style={{ marginBottom: 16 }}>{host ? 'This game is finished. Tap the Yahtzee logo to return home.' : `You’ll get a score sheet when ${hostName} starts the next game.`}</p>}
-          {game && game.sheets.length > 1 && <div className="table-strip" aria-label="Live scores">{live.map(item => {
+          {game && live.length > 1 && <div className="table-strip" aria-label="Live scores">{live.map(item => {
             const itemTotals = totals(item.scores, item.bonus), player = state?.players.find(entry => entry.id === item.player_id), mine = item.player_id === me?.id;
             return <div className={`table-chip ${mine ? 'me' : ''}`} key={item.player_id}>
               <Avatar name={item.name} photoUrl={item.photo_url} />
@@ -773,12 +853,12 @@ export default function Home() {
         </TabsList>
 
         <TabsContent value="home">
-          <div className="home-heading"><div><h1>{gameInProgress ? 'Pick up where you left off.' : waitingForHost ? `Waiting for ${hostName} to start the next game.` : waitingForPlayers ? 'Waiting for the final scores.' : 'Let’s play Yahtzee.'}</h1></div><button className="btn invite-top" onClick={() => setModal('invite')} disabled={!state}><UserPlus size={16} />Invite player</button></div>
+          <div className="home-heading"><div><h1>{gameInProgress ? 'Pick up where you left off.' : canJoinCurrent ? 'A game is in progress.' : waitingForHost ? `Waiting for ${hostName} to start the next game.` : waitingForPlayers ? 'Waiting for the final scores.' : 'Let’s play Yahtzee.'}</h1></div><button className="btn invite-top" onClick={() => setModal('invite')} disabled={!state}><UserPlus size={16} />Invite player</button></div>
           <div className="home-grid">
             <section className="start-card">
               <div className="start-row">
                 <div className="start-mark"><Dices size={34} /></div>
-                <div className="start-actions"><button className="btn primary start-game" disabled={!state || !sheet || waitingForHost || waitingForPlayers && !host || (!pagesBuild && (busy || !!savingCount))} onClick={openCurrentGame}><Play size={17} />{gameInProgress ? 'Continue game' : waitingForHost ? `Waiting for ${hostName}` : waitingForPlayers ? (host ? 'Start the next game' : 'Waiting for others to finish') : game?.ended_at || score.remaining === 0 ? 'Play another game' : 'Start game'}</button>{gameInProgress && host && <button className="text-btn start-over" onClick={requestNewGame}>Start a new game</button>}</div>
+                <div className="start-actions"><button className="btn primary start-game" disabled={canJoinCurrent ? busy : !state || !sheet || waitingForHost || waitingForPlayers && !host || (!pagesBuild && (busy || !!savingCount))} onClick={canJoinCurrent ? () => void joinCurrentGame() : openCurrentGame}><Play size={17} />{gameInProgress ? 'Continue game' : canJoinCurrent ? 'Join this game' : waitingForHost ? `Waiting for ${hostName}` : waitingForPlayers ? (host ? 'Start the next game' : 'Waiting for others to finish') : game?.ended_at || score.remaining === 0 ? 'Play another game' : 'Start game'}</button>{gameInProgress && host && <button className="text-btn start-over" onClick={requestNewGame}>Start a new game</button>}</div>
               </div>
             </section>
 
@@ -799,7 +879,7 @@ export default function Home() {
 
         <TabsContent value="history">
           <div className="intro"><h1>Game history</h1><button className="btn" onClick={() => setHomeTab('home')}><Play size={16} />Play</button></div>
-          <div className="history-layout">{Object.keys(groups).length ? Object.entries(groups).map(([day, games]) => <section key={day}><h2 className="history-date">{day}</h2>{games.map(item => <HistoryCard key={item.id} game={item} canDelete={!!host} onDelete={() => setDeleteTarget({ id: item.id, name: fmtTime(item.started_at) })} />)}</section>) : <Empty kind="history" title="No games yet" body="Games appear here after the first score is placed. Blank sheets are never saved." action={<button className="btn primary" onClick={() => setHomeTab('home')}>Start a game<ArrowRight size={15} /></button>} />}</div>
+          <div className="history-layout">{Object.keys(groups).length ? Object.entries(groups).map(([day, games]) => <section key={day}><h2 className="history-date">{day}</h2>{games.map(item => <HistoryCard key={item.id} game={item} canDelete={!!host} onDelete={() => setDeleteTarget({ id: item.id, name: fmtTime(item.started_at) })} canResume={host && pagesBuild && gameResumable(item, game?.id)} onResume={resumeGame} />)}</section>) : <Empty kind="history" title="No games yet" body="Games appear here after the first score is placed. Blank sheets are never saved." action={<button className="btn primary" onClick={() => setHomeTab('home')}>Start a game<ArrowRight size={15} /></button>} />}</div>
         </TabsContent>
       </Tabs>}
     </main>
@@ -850,7 +930,7 @@ export default function Home() {
           {error && <div role="alert" className="inline-error">{error}</div>}
         </>}
 
-        {modal === 'new' && <><DialogHeader><DialogTitle>Start a new game?</DialogTitle><DialogDescription>{waitingForPlayers ? 'Some players are still filling in their sheets. Starting now saves this game as unfinished for everyone.' : 'This game isn’t finished. Starting over will save it as unfinished.'}</DialogDescription></DialogHeader><div className="actions"><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy || !host} onClick={() => void beginNewGame()}>Start new game<ArrowRight size={15} /></button></div>{error && <p className="inline-error">{error}</p>}</>}
+        {modal === 'new' && <><DialogHeader><DialogTitle>Start a new game?</DialogTitle><DialogDescription>{waitingForPlayers ? 'Some players are still filling in their sheets. Starting now moves this game to history as finished (empty boxes count as 0). You can resume it from Game history.' : 'This game isn’t finished. Starting over moves it to history as finished (empty boxes count as 0). You can resume it from Game history.'}</DialogDescription></DialogHeader><div className="actions"><button className="btn" onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy || !host} onClick={() => void beginNewGame()}>Start new game<ArrowRight size={15} /></button></div>{error && <p className="inline-error">{error}</p>}</>}
         {modal === 'finish' && <><DialogHeader><DialogTitle>Final score</DialogTitle><DialogDescription>{me?.name === 'You' ? 'Your' : `${firstName(me?.name || 'Your')}’s`} game is complete.</DialogDescription></DialogHeader><div><div className="finish-line"><span>Upper section</span><strong><Count value={score.upper} /></strong></div>{phase >= 1 && <div className="finish-line"><span>Upper bonus</span><strong>{score.upperBonus ? <>+<Count value={35} /></> : <Count value={0} />}</strong></div>}{phase >= 2 && <div className="finish-line"><span>Lower section {sheet?.bonus ? '(includes Yahtzee bonus)' : ''}</span><strong><Count value={score.lower} /></strong></div>}</div><div className="finish-score"><p>GRAND TOTAL</p><strong><Count value={phase >= 3 ? score.total : 0} duration={700} /></strong></div><div className="actions"><button className="btn" onClick={() => { setModal(null); setHomeTab('history'); }}>Game history</button><button className="btn primary" onClick={() => { setModal(null); setHomeTab('home'); }}>Back home<ArrowRight size={15} /></button></div></>}
       </DialogContent>
     </Dialog>
@@ -889,12 +969,15 @@ export default function Home() {
   </div>;
 }
 
-function HistoryCard({ game, canDelete, onDelete }: { game: Game; canDelete: boolean; onDelete: () => void }) {
+function HistoryCard({ game, canDelete, onDelete, canResume, onResume }: { game: Game; canDelete: boolean; onDelete: () => void; canResume: boolean; onResume: (game: Game) => void }) {
+  // Everything shown in history is finished; empty boxes count as 0.
+  const incomplete = game.sheets.some(item => totals(item.scores, item.bonus).filled < 13);
+  const endedAt = game.ended_at || game.updated_at || game.started_at;
   const sorted = [...game.sheets].sort((a, b) => totals(b.scores, b.bonus).total - totals(a.scores, a.bonus).total);
   const top = sorted[0], high = top ? totals(top.scores, top.bonus).total : 0;
   const winners = sorted.filter(item => totals(item.scores, item.bonus).total === high);
   const scoreRows = [
-    ...categories.map(category => ({ id: category.id, name: category.name, value: (item: Sheet) => item.scores[category.id] ?? '—' })),
+    ...categories.map(category => ({ id: category.id, name: category.name, value: (item: Sheet) => item.scores[category.id] ?? 0 })),
     { id: 'upper-bonus', name: 'Upper bonus', value: (item: Sheet) => totals(item.scores, item.bonus).upperBonus },
     { id: 'yahtzee-bonus', name: 'Yahtzee bonus', value: (item: Sheet) => item.bonus * 100 },
     { id: 'total', name: 'Total', value: (item: Sheet) => totals(item.scores, item.bonus).total },
@@ -903,14 +986,15 @@ function HistoryCard({ game, canDelete, onDelete }: { game: Game; canDelete: boo
     <summary>
       <div className="history-summary-main">
         <h3>{fmtTime(game.started_at)} <span>·</span> {game.sheets.length} {game.sheets.length === 1 ? 'player' : 'players'}</h3>
-        <p>{game.ended_at ? `${Math.max(1, Math.round((game.ended_at - game.started_at) / 60000))} min · ${sorted.length === 1 ? 'Solo game' : winners.length > 1 ? 'Shared victory' : `${top?.name} won`}` : 'Unfinished game · not counted in wins'}</p>
+        <p>{incomplete ? `Auto-finished · empty boxes count as 0 · ${sorted.length === 1 ? 'Solo game' : winners.length > 1 ? 'Shared victory' : `${top?.name} won`}` : `${Math.max(1, Math.round((endedAt - game.started_at) / 60000))} min · ${sorted.length === 1 ? 'Solo game' : winners.length > 1 ? 'Shared victory' : `${top?.name} won`}`}</p>
       </div>
       {top && <div className="history-winner"><Avatar name={top.name} photoUrl={top.photo_url} /><span>{top.name}</span></div>}
-      <span className="history-score"><span className={`pill ${game.ended_at ? '' : 'neutral'}`}>{game.ended_at ? <Trophy size={13} /> : <Flag size={13} />} {game.ended_at ? `${high} pts` : 'Unfinished'}</span><ChevronDown size={16} /></span>
+      <span className="history-score"><span className={`pill ${incomplete ? 'neutral' : ''}`}>{incomplete ? <Flag size={13} /> : <Trophy size={13} />} {high} pts</span><ChevronDown size={16} /></span>
     </summary>
     {canDelete && <button className="history-delete" aria-label={`Delete game from ${fmtTime(game.started_at)}`} onClick={event => { event.preventDefault(); onDelete(); }}><Trash2 size={17} /></button>}
     <div className="history-results">
-      <div className="history-standings">{sorted.map((item, index) => <div className="player-row" key={item.player_id}><span className="player-rank">{index + 1}</span><Avatar name={item.name} photoUrl={item.photo_url} /><span className="player-name">{item.name}<small>{item.completed_at ? 'Finished' : `${totals(item.scores, item.bonus).filled} of 13 scored`}</small></span><span className="player-score">{totals(item.scores, item.bonus).total}</span></div>)}</div>
+      {canResume && <button type="button" className="btn primary history-resume" onClick={() => onResume(game)}><Play size={15} />Resume this game</button>}
+      <div className="history-standings">{sorted.map((item, index) => <div className="player-row" key={item.player_id}><span className="player-rank">{index + 1}</span><Avatar name={item.name} photoUrl={item.photo_url} /><span className="player-name">{item.name}<small>{totals(item.scores, item.bonus).filled === 13 ? 'Finished' : `${totals(item.scores, item.bonus).filled} of 13 scored · rest count as 0`}</small></span><span className="player-score">{totals(item.scores, item.bonus).total}</span></div>)}</div>
       {sorted.map(item => <div className="history-scorecard" key={item.player_id}>
         <div className="history-scorecard-head"><span>{item.name}</span><strong>{totals(item.scores, item.bonus).total}</strong></div>
         <div className="history-score-grid">{scoreRows.map(row => <div className={`history-score-cell ${row.id === 'total' ? 'total' : ''}`} key={row.id}><span>{row.name}</span><strong>{row.value(item)}</strong></div>)}</div>

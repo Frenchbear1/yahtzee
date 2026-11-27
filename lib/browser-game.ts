@@ -1,6 +1,8 @@
-import { gameHasMoves, totals, validScore, type Game, type Room, type Scores, type Sheet, type State } from './game';
+import { gameHasMoves, staleAfter, totals, validScore, type Game, type Room, type Scores, type Sheet, type State } from './game';
 
-type BrowserRoom = Room & { created_at: number };
+// current_game_id is set only after resuming an older game; otherwise the
+// newest game is the current one.
+type BrowserRoom = Room & { created_at: number; current_game_id?: string };
 type BrowserStore = {
   version: 1;
   me: State['me'];
@@ -98,6 +100,7 @@ function repairStore(parsed: BrowserStore) {
       item.bonus = Number(item.bonus) || 0;
       item.revision = Number(item.revision) || 0;
     }
+    if (typeof game.updated_at !== 'number') game.updated_at = game.ended_at || Date.now();
   }
   return parsed;
 }
@@ -188,7 +191,7 @@ export function mergeBrowserCloudData(value: unknown, profile?: { name?: string 
     store.me.photo_url = cleanPhoto(profile.photoUrl);
   }
   store.games = [...byId.values()];
-  const localCurrent = roomGames(store)[0];
+  const localCurrent = currentGame(store);
   const remoteCurrent = remoteGames.sort((a, b) => b.started_at - a.started_at)[0];
   if (localCurrent && !gameHasMoves(localCurrent) && remoteCurrent && !remoteCurrent.ended_at) {
     store.games = store.games.filter(game => game.id !== localCurrent.id);
@@ -203,6 +206,19 @@ function currentRoom(store: BrowserStore) {
 
 function roomGames(store: BrowserStore, roomId = store.currentRoom) {
   return store.games.filter(game => game.room_id === roomId).sort((a, b) => b.started_at - a.started_at);
+}
+
+function currentGame(store: BrowserStore) {
+  const room = store.rooms.find(item => item.id === store.currentRoom);
+  const games = roomGames(store);
+  return games.find(game => game.id === room?.current_game_id) || games[0];
+}
+
+function newCurrentGame(store: BrowserStore, gameId = id()) {
+  const now = Date.now();
+  store.games.push({ id: gameId, room_id: store.currentRoom, started_at: now, ended_at: null, updated_at: now, sheets: [sheet(gameId, store.me.id, store.me.name)] });
+  const room = store.rooms.find(item => item.id === store.currentRoom);
+  if (room) delete room.current_game_id;
 }
 
 function publicRoom(room: BrowserRoom): Room {
@@ -221,7 +237,7 @@ function snapshot(store: BrowserStore): State {
       members: [store.me],
     })),
     players: [{ ...store.me, active: true }],
-    game: history[0],
+    game: currentGame(store),
     history,
     mode: 'browser',
   };
@@ -272,7 +288,7 @@ export async function browserGameRequest(body: Record<string, unknown>): Promise
     store.currentRoom = room.id;
   } else if (action === 'score' || action === 'bonus') {
     const game = roomGames(store).find(item => item.id === String(body.gameId || '')) || fail('This score sheet is not available.', 404);
-    if (roomGames(store)[0]?.id !== game.id) fail('This game has been saved to history. Open the current game.', 409);
+    if (currentGame(store)?.id !== game.id) fail('This game has been saved to history. Open the current game.', 409);
     const playerSheet = game.sheets.find(item => item.player_id === store.me.id) || fail('This score sheet is not available.', 404);
     if (body.revision !== playerSheet.revision) fail('This score changed in another tab. Your sheet has been refreshed; try again.', 409);
     const scores: Scores = { ...playerSheet.scores };
@@ -295,22 +311,36 @@ export async function browserGameRequest(body: Record<string, unknown>): Promise
     playerSheet.revision += 1;
     playerSheet.completed_at = totals(scores, bonus).filled === 13 ? Date.now() : null;
     game.ended_at = playerSheet.completed_at;
+    game.updated_at = Date.now();
   } else if (action === 'delete-game') {
     const gameId = String(body.gameId || '');
     const game = store.games.find(item => item.id === gameId && item.room_id === store.currentRoom) || fail('That game was not found.', 404);
-    const wasCurrent = roomGames(store)[0]?.id === game.id;
+    const wasCurrent = currentGame(store)?.id === game.id;
     store.games = store.games.filter(item => item.id !== gameId);
-    if (wasCurrent) {
-      const gameId = id(), now = Date.now();
-      store.games.push({ id: gameId, room_id: store.currentRoom, started_at: now, ended_at: null, sheets: [sheet(gameId, store.me.id, store.me.name)] });
-    }
+    if (wasCurrent) newCurrentGame(store);
   } else if (action === 'new-game') {
-    const latest = roomGames(store)[0];
+    const latest = currentGame(store);
     const proposedId = String(body.newGameId || '');
     if (latest && proposedId && latest.id === proposedId) return snapshot(store); // already started
     if (!latest || latest.id !== String(body.gameId || '')) fail('A new game has already started. Your game is refreshed.', 409);
-    const gameId = /^[a-zA-Z0-9_-]{1,128}$/.test(proposedId) ? proposedId : id(), now = Date.now();
-    store.games.push({ id: gameId, room_id: store.currentRoom, started_at: now, ended_at: null, sheets: [sheet(gameId, store.me.id, store.me.name)] });
+    // The old game goes to history as finished (empty boxes count as 0).
+    if (!latest.ended_at && gameHasMoves(latest)) latest.ended_at = Date.now();
+    newCurrentGame(store, /^[a-zA-Z0-9_-]{1,128}$/.test(proposedId) ? proposedId : id());
+  } else if (action === 'finish-stale') {
+    const game = currentGame(store);
+    if (game && game.id === String(body.gameId || '') && !game.ended_at && gameHasMoves(game)
+      && Date.now() - (game.updated_at || game.started_at) >= staleAfter) game.ended_at = Date.now();
+  } else if (action === 'resume-game') {
+    const target = roomGames(store).find(item => item.id === String(body.gameId || '')) || fail('That game was not found.', 404);
+    const current = currentGame(store);
+    if (current && current.id !== target.id) {
+      if (!gameHasMoves(current)) store.games = store.games.filter(item => item.id !== current.id);
+      else if (!current.ended_at) current.ended_at = Date.now();
+    }
+    target.ended_at = null;
+    target.updated_at = Date.now();
+    for (const playerSheet of target.sheets) if (totals(playerSheet.scores, playerSheet.bonus).filled < 13) playerSheet.completed_at = null;
+    currentRoom(store).current_game_id = target.id;
   } else if (!['bootstrap', 'refresh'].includes(action)) {
     fail('Unknown action.');
   }
